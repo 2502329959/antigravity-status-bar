@@ -1,22 +1,29 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Context Usage</title>
+<title>Antigravity 状态栏</title>
 <script src="/preload.js"></script>
 <style>
   :root {
-    --c-system: #9aa0a6;
-    --c-user: #a8c7fa;
-    --c-agent: #4c8df6;
-    --c-tool: #f9ab00;
-    --c-custom: #c58af9;
-    --c-sysmsg: #f28b82;
+    --c-system: #8e9196;
+    --c-user: #58a6ff;
+    --c-agent: #a371f7;
+    --c-tool: #e3a008;
+    --c-custom: #3fb950;
+    --c-sysmsg: #f85149;
+    --c-running: #3fb950;
+    --c-done: #3fb950;
+    --c-error: #f85149;
+    --c-cancelled: #8e9196;
     --fg: var(--foreground, #e3e3e3);
     --dim: var(--muted-foreground, #9aa0a6);
     --line: var(--border, rgba(127, 127, 127, .25));
-    --empty: color-mix(in srgb, var(--dim) 28%, transparent);
+    --surface: color-mix(in srgb, var(--fg) 4%, transparent);
+    --surface-hover: color-mix(in srgb, var(--fg) 7%, transparent);
+    --code-bg: color-mix(in srgb, var(--fg) 5%, transparent);
+    --empty: color-mix(in srgb, var(--dim) 24%, transparent);
   }
   * { box-sizing: border-box; }
   body {
@@ -25,7 +32,6 @@
     font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     -webkit-font-smoothing: antialiased;
   }
-  /* thin overlay-style scrollbar instead of the platform default */
   ::-webkit-scrollbar { width: 10px; height: 10px; }
   ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
   ::-webkit-scrollbar-button { display: none; }
@@ -41,31 +47,84 @@
   main { padding: 12px 14px 18px; }
   .dim { color: var(--dim); }
   .num { font-variant-numeric: tabular-nums; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 
   /* header */
   .top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
   .model { font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 6px; }
   .live { width: 6px; height: 6px; border-radius: 50%; background: var(--empty); flex: none; }
-  .live.on { background: #81c995; }
-  .usage { margin: 2px 0 12px; display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+  .live.on { background: var(--c-running); }
+  .usage { margin: 2px 0 10px; display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
   .usage .big { font-size: 24px; font-weight: 600; letter-spacing: -.01em; }
   .usage .of { color: var(--dim); }
   .usage .pct { margin-left: auto; font-size: 13px; font-weight: 600; }
-  button {
-    font: inherit; font-size: 12px; color: var(--dim); cursor: pointer; white-space: nowrap;
+  button.btn {
+    font: inherit; font-size: 11.5px; color: var(--dim); cursor: pointer; white-space: nowrap;
     background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px;
+    transition: color .15s ease, border-color .15s ease, background .15s ease;
   }
-  button:hover { color: var(--fg); border-color: var(--dim); }
+  button.btn:hover { color: var(--fg); border-color: var(--dim); background: var(--surface); }
+  button.btn.sm { font-size: 11px; padding: 2px 7px; }
 
-  /* grid: each dot is 1% of the context window */
-  .grid { display: grid; grid-template-columns: repeat(20, 1fr); gap: 4px; max-width: 320px; margin-bottom: 4px; }
-  .dot { aspect-ratio: 1; border-radius: 50%; background: var(--empty); }
-  .legend { font-size: 11px; color: var(--dim); margin-bottom: 4px; }
+  /* Claude Code style segmented linear context bar */
+  .ctx-bar-wrap { margin-bottom: 4px; }
+  .ctx-bar {
+    height: 8px;
+    width: 100%;
+    border-radius: 999px;
+    background: var(--empty);
+    display: flex;
+    align-items: stretch;
+    overflow: hidden;
+    gap: 1.5px;
+    padding: 0;
+  }
+  .ctx-bar .seg {
+    height: 100%;
+    min-width: 3px;
+    border-radius: 1.5px;
+    cursor: pointer;
+    transition: width .25s ease, opacity .15s ease, filter .15s ease;
+  }
+  .ctx-bar .seg:first-child { border-top-left-radius: 999px; border-bottom-left-radius: 999px; }
+  .ctx-bar .seg:last-child { border-top-right-radius: 999px; border-bottom-right-radius: 999px; }
+  .ctx-bar.is-hovering .seg:not(.active) { opacity: .35; }
+  .ctx-bar .seg.active { filter: brightness(1.15); }
+  .ctx-bar-readout {
+    margin-top: 6px;
+    min-height: 18px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11.5px;
+    color: var(--dim);
+  }
+  .ctx-bar-readout .dot-swatch {
+    width: 7px; height: 7px; border-radius: 50%; flex: none; display: inline-block;
+  }
+  .ctx-bar-readout strong { color: var(--fg); font-weight: 500; }
+  .ctx-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--dim);
+  }
+  .ctx-legend-item {
+    display: inline-flex; align-items: center; gap: 4px; cursor: default;
+    transition: color .15s ease;
+  }
+  .ctx-legend-item.active { color: var(--fg); }
+  .ctx-legend-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
 
   /* sections */
   section { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 10px; }
-  h2 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin: 0 0 6px; display: flex; justify-content: space-between; }
-  h2 .hint { text-transform: none; letter-spacing: 0; font-weight: 400; }
+  h2 {
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--dim); margin: 0 0 8px; display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  }
+  h2 .hint { text-transform: none; letter-spacing: 0; font-weight: 400; display: inline-flex; align-items: center; gap: 5px; }
   .note { font-size: 12px; color: var(--dim); margin: -2px 0 8px; }
   .group + .group { margin-top: 8px; }
   .row { display: grid; grid-template-columns: 10px 1fr auto 42px; align-items: center; gap: 8px; padding: 2.5px 0; }
@@ -75,13 +134,134 @@
   .mark.sq { border-radius: 2px; }
   .mark.free { background: transparent; border: 1.5px solid var(--empty); }
 
+  /* background tasks */
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 500;
+    border: 1px solid var(--line); color: var(--dim);
+  }
+  .status-pill.running {
+    color: var(--c-running);
+    border-color: color-mix(in srgb, var(--c-running) 40%, transparent);
+    background: color-mix(in srgb, var(--c-running) 10%, transparent);
+  }
+  .status-dot {
+    width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--dim);
+  }
+  .status-dot.running {
+    background: var(--c-running);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--c-running) 70%, transparent);
+    animation: pulse 1.8s infinite;
+  }
+  .status-dot.done { background: var(--c-done); }
+  .status-dot.error { background: var(--c-error); }
+  .status-dot.cancelled, .status-dot.unknown { background: var(--c-cancelled); }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c-running) 60%, transparent); }
+    70% { box-shadow: 0 0 0 5px transparent; }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
+
+  .tasks-empty { font-size: 12px; color: var(--dim); padding: 2px 0; }
+  .task-list { display: flex; flex-direction: column; gap: 6px; }
+  .task-card {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    overflow: hidden;
+  }
+  .task-card.is-running {
+    border-color: color-mix(in srgb, var(--c-running) 35%, var(--line));
+  }
+  .task-toggle {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: var(--fg);
+    font: inherit;
+    padding: 7px 9px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    cursor: pointer;
+    text-align: left;
+  }
+  .task-toggle:hover { background: var(--surface-hover); }
+  .task-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12.5px;
+    font-weight: 500;
+  }
+  .tag {
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    border: 1px solid var(--line);
+    color: var(--dim);
+    flex: none;
+  }
+  .tag.daemon { color: var(--c-agent); border-color: color-mix(in srgb, var(--c-agent) 40%, transparent); }
+  .tag.timer { color: var(--c-tool); border-color: color-mix(in srgb, var(--c-tool) 40%, transparent); }
+  .task-time { font-size: 11px; color: var(--dim); flex: none; }
+  .chevron {
+    font-size: 10px; color: var(--dim); flex: none;
+    transition: transform .15s ease;
+  }
+  .task-card.is-expanded .chevron { transform: rotate(90deg); }
+
+  .task-detail {
+    border-top: 1px solid var(--line);
+    padding: 8px 9px 9px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .task-meta-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    font-size: 11px;
+    color: var(--dim);
+  }
+  .task-meta-item strong { color: var(--fg); font-weight: 500; }
+  .task-block-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+    font-size: 11px;
+    color: var(--dim);
+  }
+  .code-box {
+    margin: 0;
+    padding: 7px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    background: var(--code-bg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 140px;
+    overflow: auto;
+    color: var(--fg);
+  }
+  .code-box.log-box { max-height: 220px; }
+  .tasks-more { margin-top: 7px; display: flex; justify-content: center; }
+
   .files li { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 3px 0; }
   .files .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .files .dir { display: block; font-size: 11.5px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
   .files .tok { color: var(--dim); font-size: 12px; align-self: start; }
   ul { list-style: none; margin: 0; padding: 0; }
   .ck-main { display: flex; justify-content: space-between; gap: 8px; }
-  .badge { font-size: 11px; color: #81c995; border: 1px solid color-mix(in srgb, #81c995 40%, transparent); border-radius: 999px; padding: 0 7px; white-space: nowrap; }
+  .badge { font-size: 11px; color: var(--c-running); border: 1px solid color-mix(in srgb, var(--c-running) 40%, transparent); border-radius: 999px; padding: 0 7px; white-space: nowrap; }
 
   .empty { margin: 48px 8px; text-align: center; color: var(--dim); }
   footer { margin-top: 16px; font-size: 11px; color: var(--dim); display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
@@ -93,16 +273,44 @@
 <script>
 (() => {
   const POLL_MS = 3000;
-  const SEGMENT_COLORS = ['var(--c-system)', 'var(--c-user)', 'var(--c-agent)', 'var(--c-tool)', 'var(--c-custom)'];
-  const CONVERSATION = { user: 'var(--c-user)', agent: 'var(--c-agent)', tool: 'var(--c-tool)', system_messages: 'var(--c-sysmsg)' };
+  const FINISHED_PREVIEW_LIMIT = 5;
+
+  const BAR_SEGMENT_DEFS = [
+    { key: 'system', label: 'System', color: 'var(--c-system)' },
+    { key: 'user', label: 'User', color: 'var(--c-user)' },
+    { key: 'agent', label: 'Agent', color: 'var(--c-agent)' },
+    { key: 'tools', label: 'Tools', color: 'var(--c-tool)' },
+    { key: 'custom', label: 'Custom', color: 'var(--c-custom)' },
+    { key: 'sysmsg', label: 'SysMsg', color: 'var(--c-sysmsg)' },
+  ];
+
+  const CONVERSATION = {
+    user: 'var(--c-user)',
+    agent: 'var(--c-agent)',
+    tool: 'var(--c-tool)',
+    system_messages: 'var(--c-sysmsg)',
+  };
   const SYSTEM = new Set(['system_prompt', 'system_tools', 'system_overhead']);
+
+  const STATUS_LABELS = {
+    running: '运行中',
+    done: '已完成',
+    error: '失败',
+    cancelled: '已取消',
+    unknown: '未知',
+  };
+
   const params = new URLSearchParams(location.search);
   const conversationId = (window.sidecar && window.sidecar.conversationId) || params.get('conversationId') || '';
   const doFetch = (window.sidecar && window.sidecar.fetch) || fetch;
   const main = document.getElementById('main');
+
   let workspace = '';
   let report = null;
   let lastJson = '';
+  const expandedTaskIds = new Set();
+  const taskLogs = new Map(); // step_idx -> { loading, data, error }
+  let showFinishedTasks = false;
 
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -112,24 +320,313 @@
     return String(n);
   }
 
-  // The CLI's cell allocation: at least one cell per non-empty segment, scaled down on overflow.
-  function gridCells(segments, limit, total) {
-    let counts = segments.map((t) => (!t || !limit ? 0 : Math.max(1, Math.floor(t / limit * total))));
-    const used = counts.reduce((a, b) => a + b, 0);
-    if (used > total) counts = counts.map((c) => Math.floor(c * total / used));
-    return [...counts, total - counts.reduce((a, b) => a + b, 0)];
+  function fmtBytes(n) {
+    if (!n) return '0 B';
+    if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${n} B`;
   }
 
-  function grid(r) {
-    const counts = gridCells(r.grid_segments, r.limit_tokens, 100);
-    let dots = '';
-    counts.forEach((n, i) => {
-      dots += (i === 5 ? '<span class="dot"></span>' : `<span class="dot" style="background:${SEGMENT_COLORS[i]}"></span>`).repeat(n);
+  function fmtRelativeTime(epochSec) {
+    if (!epochSec) return '-';
+    const diff = Math.max(0, Math.floor(Date.now() / 1000) - epochSec);
+    if (diff < 60) return `${diff}s 前`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m 前`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h 前`;
+    return `${Math.floor(diff / 86400)}d 前`;
+  }
+
+  function fmtDateTime(epochSec) {
+    if (!epochSec) return '-';
+    return new Date(epochSec * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  async function copyText(text, btn, idleLabel) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+    if (btn) {
+      btn.textContent = '已复制';
+      setTimeout(() => { btn.textContent = idleLabel; }, 1500);
+    }
+  }
+
+  function buildBarSegments(r) {
+    const raw = Array.isArray(r.grid_segments) ? r.grid_segments : [0, 0, 0, 0, 0];
+    const sysMsgCat = (r.categories || []).find((c) => c.key === 'system_messages');
+    const sysMsgTok = sysMsgCat ? sysMsgCat.tokens : 0;
+    const values = [raw[0] || 0, raw[1] || 0, raw[2] || 0, raw[3] || 0, raw[4] || 0, sysMsgTok];
+    const limit = r.limit_tokens > 0 ? r.limit_tokens : Math.max(1, r.used_tokens || 0);
+    const nonZeroSum = values.reduce((a, b) => a + b, 0);
+    const denom = Math.max(limit, nonZeroSum || 1);
+
+    return BAR_SEGMENT_DEFS.map((def, i) => {
+      const tokens = values[i];
+      const pctOfLimit = r.limit_tokens > 0 ? (tokens / r.limit_tokens * 100) : (nonZeroSum ? tokens / nonZeroSum * 100 : 0);
+      const widthPct = tokens > 0 ? (tokens / denom * 100) : 0;
+      return { ...def, tokens, pctOfLimit, widthPct };
+    }).filter((seg) => seg.tokens > 0);
+  }
+
+  function defaultReadoutHtml(r) {
+    if (!r.limit_tokens) {
+      return `<span>已用 <strong>${fmtTok(r.used_tokens)}</strong> tokens</span>`;
+    }
+    return `<span>已用 <strong>${r.used_pct.toFixed(1)}%</strong> · 剩余 <strong>${fmtTok(r.free_tokens)}</strong> tokens</span>`;
+  }
+
+  function contextBarHtml(r) {
+    const segs = buildBarSegments(r);
+    const barInner = segs.map((seg) => (
+      `<span class="seg" data-seg="${esc(seg.key)}" `
+      + `data-label="${esc(seg.label)}" data-color="${esc(seg.color)}" `
+      + `data-tokens="${seg.tokens}" data-pct="${seg.pctOfLimit.toFixed(1)}" `
+      + `style="width:${seg.widthPct.toFixed(3)}%;background:${seg.color}" `
+      + `title="${esc(seg.label)}: ${fmtTok(seg.tokens)} tokens (${seg.pctOfLimit.toFixed(1)}%)"></span>`
+    )).join('');
+
+    const legend = segs.map((seg) => (
+      `<span class="ctx-legend-item" data-seg="${esc(seg.key)}">`
+      + `<span class="ctx-legend-dot" style="background:${seg.color}"></span>`
+      + `<span>${esc(seg.label)}</span>`
+      + `<span class="num">${seg.pctOfLimit.toFixed(1)}%</span>`
+      + `</span>`
+    )).join('');
+
+    return `
+      <div class="ctx-bar-wrap">
+        <div class="ctx-bar" id="ctx-bar">${barInner}</div>
+        <div class="ctx-bar-readout" id="ctx-bar-readout">${defaultReadoutHtml(r)}</div>
+        ${legend ? `<div class="ctx-legend" id="ctx-legend">${legend}</div>` : ''}
+      </div>`;
+  }
+
+  function bindBarHover(r) {
+    const bar = document.getElementById('ctx-bar');
+    const readout = document.getElementById('ctx-bar-readout');
+    const legend = document.getElementById('ctx-legend');
+    if (!bar || !readout) return;
+
+    const reset = () => {
+      bar.classList.remove('is-hovering');
+      bar.querySelectorAll('.seg.active').forEach((el) => el.classList.remove('active'));
+      if (legend) legend.querySelectorAll('.ctx-legend-item.active').forEach((el) => el.classList.remove('active'));
+      readout.innerHTML = defaultReadoutHtml(r);
+    };
+
+    const activate = (key) => {
+      const segEl = bar.querySelector(`.seg[data-seg="${key}"]`);
+      if (!segEl) return;
+      bar.classList.add('is-hovering');
+      bar.querySelectorAll('.seg').forEach((el) => el.classList.toggle('active', el === segEl));
+      if (legend) {
+        legend.querySelectorAll('.ctx-legend-item').forEach((el) => el.classList.toggle('active', el.dataset.seg === key));
+      }
+      const { label, color, tokens, pct } = segEl.dataset;
+      readout.innerHTML = `<span class="dot-swatch" style="background:${color}"></span>`
+        + `<strong>${esc(label)}</strong>`
+        + `<span class="num">${fmtTok(Number(tokens))} tokens (${pct}%)</span>`;
+    };
+
+    bar.querySelectorAll('.seg').forEach((el) => {
+      el.addEventListener('mouseenter', () => activate(el.dataset.seg));
     });
-    return `<div class="grid" title="Each dot is 1% of the context window">${dots}</div>`;
+    bar.addEventListener('mouseleave', reset);
+    if (legend) {
+      legend.querySelectorAll('.ctx-legend-item').forEach((el) => {
+        el.addEventListener('mouseenter', () => activate(el.dataset.seg));
+        el.addEventListener('mouseleave', reset);
+      });
+    }
   }
 
-  function categoryRow(c, limit) {
+  function taskCardHtml(t) {
+    const isExpanded = expandedTaskIds.has(t.step_idx);
+    const statusLabel = STATUS_LABELS[t.status] || t.status;
+    const title = t.title || t.command || t.task_id || `Task #${t.step_idx}`;
+    const badges = [];
+    if (t.is_daemon) badges.push('<span class="tag daemon">Daemon</span>');
+    if (t.tool === 'schedule') badges.push('<span class="tag timer">Timer</span>');
+
+    let detailHtml = '';
+    if (isExpanded) {
+      const logState = taskLogs.get(t.step_idx);
+      let logText = '';
+      let logHint = '';
+      if (logState && logState.loading && !logState.data) {
+        logText = '正在读取日志…';
+      } else if (logState && logState.error) {
+        logText = t.output_preview || `日志读取失败: ${logState.error}`;
+      } else if (logState && logState.data && logState.data.exists) {
+        logText = logState.data.content || '(日志文件为空)';
+        const mtimeSec = logState.data.mtimeMs ? Math.floor(logState.data.mtimeMs / 1000) : t.log_mtime;
+        const sizeVal = logState.data.size ?? t.log_size;
+        logHint = `${fmtBytes(sizeVal)}${mtimeSec ? ` · 更新于 ${fmtRelativeTime(mtimeSec)}` : ''}${logState.data.truncated ? ' · 仅显示末尾 32 KB' : ''}`;
+      } else {
+        logText = t.output_preview || '(暂无输出日志)';
+        if (t.has_log) logHint = `${fmtBytes(t.log_size)}`;
+      }
+
+      const cmdDisplay = t.command || '(无命令详情)';
+      detailHtml = `
+        <div class="task-detail">
+          <div class="task-meta-grid">
+            <span class="task-meta-item">状态: <strong>${esc(statusLabel)}</strong></span>
+            <span class="task-meta-item">启动: <strong>${esc(fmtDateTime(t.started_at))}</strong></span>
+            ${t.task_id ? `<span class="task-meta-item mono">ID: ${esc(t.task_id.split('/').pop())}</span>` : ''}
+          </div>
+          <div>
+            <div class="task-block-head">
+              <span>执行命令</span>
+              <button type="button" class="btn sm task-copy-cmd" data-step="${t.step_idx}">复制命令</button>
+            </div>
+            <pre class="code-box">${esc(cmdDisplay)}</pre>
+          </div>
+          <div>
+            <div class="task-block-head">
+              <span>执行输出${logHint ? ` · ${esc(logHint)}` : ''}</span>
+              <button type="button" class="btn sm task-refresh-log" data-step="${t.step_idx}">刷新日志</button>
+            </div>
+            <pre class="code-box log-box" id="task-log-${t.step_idx}">${esc(logText)}</pre>
+          </div>
+        </div>`;
+    }
+
+    return `
+      <div class="task-card ${t.status === 'running' ? 'is-running' : ''} ${isExpanded ? 'is-expanded' : ''}" data-step="${t.step_idx}">
+        <button type="button" class="task-toggle" data-step="${t.step_idx}" aria-expanded="${isExpanded}">
+          <span class="status-dot ${esc(t.status)}" title="${esc(statusLabel)}"></span>
+          <span class="task-title" title="${esc(title)}">${esc(title)}</span>
+          ${badges.join('')}
+          <span class="task-time num" title="${esc(fmtDateTime(t.started_at))}">${esc(fmtRelativeTime(t.started_at))}</span>
+          <span class="chevron">▸</span>
+        </button>
+        ${detailHtml}
+      </div>`;
+  }
+
+  function tasksSectionHtml(r) {
+    const allTasks = Array.isArray(r.background_tasks) ? r.background_tasks : [];
+    const running = allTasks.filter((t) => t.status === 'running');
+    const finished = allTasks.filter((t) => t.status !== 'running');
+
+    let pillHtml = '<span class="status-pill">暂无</span>';
+    if (running.length > 0) {
+      pillHtml = `<span class="status-pill running"><span class="status-dot running"></span>${running.length} 运行中</span>`;
+    } else if (allTasks.length > 0) {
+      pillHtml = `<span class="status-pill">无运行中任务 (共 ${allTasks.length} 条)</span>`;
+    }
+
+    let bodyHtml = '<div class="tasks-empty">当前会话尚无后台任务记录</div>';
+    if (allTasks.length > 0) {
+      const visibleFinished = showFinishedTasks ? finished : finished.slice(0, FINISHED_PREVIEW_LIMIT);
+      const visibleTasks = [...running, ...visibleFinished];
+      const moreCount = finished.length - visibleFinished.length;
+      const moreBtn = finished.length > FINISHED_PREVIEW_LIMIT
+        ? `<div class="tasks-more"><button type="button" class="btn sm" id="toggle-finished-tasks">${showFinishedTasks ? '收起历史任务' : `展开其余 ${moreCount} 条历史任务`}</button></div>`
+        : '';
+      bodyHtml = `<div class="task-list">${visibleTasks.map(taskCardHtml).join('')}</div>${moreBtn}`;
+    }
+
+    return `<section id="tasks-section"><h2>后台任务 <span class="hint">${pillHtml}</span></h2>${bodyHtml}</section>`;
+  }
+
+  function bindTasksEvents() {
+    const sec = document.getElementById('tasks-section');
+    if (!sec || !report) return;
+
+    sec.querySelectorAll('.task-toggle').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const stepIdx = Number(btn.dataset.step);
+        if (expandedTaskIds.has(stepIdx)) {
+          expandedTaskIds.delete(stepIdx);
+          renderTasksOnly();
+        } else {
+          expandedTaskIds.add(stepIdx);
+          renderTasksOnly();
+          fetchTaskLog(stepIdx, false);
+        }
+      });
+    });
+
+    sec.querySelectorAll('.task-copy-cmd').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const stepIdx = Number(btn.dataset.step);
+        const task = (report.background_tasks || []).find((t) => t.step_idx === stepIdx);
+        if (task) copyText(task.command || '', btn, '复制命令');
+      });
+    });
+
+    sec.querySelectorAll('.task-refresh-log').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        fetchTaskLog(Number(btn.dataset.step), true);
+      });
+    });
+
+    const toggleFinished = document.getElementById('toggle-finished-tasks');
+    if (toggleFinished) {
+      toggleFinished.addEventListener('click', () => {
+        showFinishedTasks = !showFinishedTasks;
+        renderTasksOnly();
+      });
+    }
+  }
+
+  function renderTasksOnly() {
+    if (!report) return;
+    const existing = document.getElementById('tasks-section');
+    if (!existing) return;
+    const tmp = document.createElement('div');
+    tmp.innerHTML = tasksSectionHtml(report);
+    const next = tmp.firstElementChild;
+    existing.replaceWith(next);
+    bindTasksEvents();
+  }
+
+  async function fetchTaskLog(stepIdx, force) {
+    if (!conversationId) return;
+    const prev = taskLogs.get(stepIdx);
+    if (!prev || force) {
+      taskLogs.set(stepIdx, { loading: true, data: prev ? prev.data : null, error: null });
+    }
+    try {
+      const qs = new URLSearchParams({ conversationId, stepIdx: String(stepIdx) });
+      const res = await doFetch(`/api/task-log?${qs}`);
+      const data = await res.json();
+      if (data.error) {
+        taskLogs.set(stepIdx, { loading: false, data: prev ? prev.data : null, error: data.message || data.error });
+      } else {
+        const changed = !prev || !prev.data
+          || prev.data.mtimeMs !== data.mtimeMs
+          || prev.data.size !== data.size
+          || prev.data.content !== data.content;
+        taskLogs.set(stepIdx, { loading: false, data, error: null });
+        if (!changed && !force) return;
+      }
+    } catch (err) {
+      taskLogs.set(stepIdx, { loading: false, data: prev ? prev.data : null, error: err.message || 'network error' });
+    }
+    if (expandedTaskIds.has(stepIdx)) {
+      const logEl = document.getElementById(`task-log-${stepIdx}`);
+      const wasAtBottom = logEl ? (logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 24) : false;
+      renderTasksOnly();
+      if (wasAtBottom) {
+        const nextLogEl = document.getElementById(`task-log-${stepIdx}`);
+        if (nextLogEl) nextLogEl.scrollTop = nextLogEl.scrollHeight;
+      }
+    }
+  }
+
+  function categoryRow(c) {
     const color = CONVERSATION[c.key] || (SYSTEM.has(c.key) ? 'var(--c-system)' : 'var(--c-custom)');
     const shape = CONVERSATION[c.key] ? '' : ' sq';
     return `<div class="row"><span class="mark${shape}" style="background:${color}"></span><span>${esc(c.name)}</span>`
@@ -147,8 +644,8 @@
     const buffer = r.checkpoint_buffer
       ? `<p class="note">Checkpoint buffer: ${fmtTok(r.checkpoint_buffer)} tokens (not counted in usage)</p>` : '';
     return `<section><h2>Token usage</h2>${note}
-      <div class="group">${conv.map((c) => categoryRow(c, limit)).join('')}</div>
-      ${rest.length ? `<div class="group">${rest.map((c) => categoryRow(c, limit)).join('')}</div>` : ''}
+      <div class="group">${conv.map(categoryRow).join('')}</div>
+      ${rest.length ? `<div class="group">${rest.map(categoryRow).join('')}</div>` : ''}
       <div class="group">${free}</div>${buffer}</section>`;
   }
 
@@ -180,18 +677,20 @@
   }
 
   function render(r) {
+    const scrollY = window.scrollY;
     const limit = r.limit_tokens;
     main.innerHTML = `
       <div class="top">
         <div class="model"><span class="live on" title="Live"></span>${esc(r.model)}</div>
-        <button id="copy" title="Copy the report as the CLI prints it">Copy as text</button>
+        <button type="button" class="btn" id="copy" title="Copy the report as the CLI prints it">Copy as text</button>
       </div>
       <div class="usage">
         <span class="big num">${fmtTok(r.used_tokens)}</span>
         <span class="of">/ ${limit ? fmtTok(limit) : 'Unknown'} tokens</span>
         ${limit ? `<span class="pct num">${r.used_pct.toFixed(1)}%</span>` : ''}
       </div>
-      ${grid(r)}
+      ${contextBarHtml(r)}
+      ${tasksSectionHtml(r)}
       ${categories(r)}
       ${checkpoints(r)}
       ${files('Knowledge files', '/rules', r.knowledge_files)}
@@ -199,7 +698,13 @@
       ${files('Skill files', '/skill', r.skill_files)}
       ${files('System files', 'auto-loaded', r.system_files)}
       <footer><span>Related: /artifact · /skill · /rewind</span><span>Updated ${esc(new Date(r.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}</span></footer>`;
-    document.getElementById('copy').addEventListener('click', copy);
+
+    document.getElementById('copy').addEventListener('click', (e) => {
+      if (report) copyText(report.text, e.currentTarget, 'Copy as text');
+    });
+    bindBarHover(r);
+    bindTasksEvents();
+    window.scrollTo(0, scrollY);
   }
 
   function showMessage(text) {
@@ -208,21 +713,12 @@
     main.innerHTML = `<p class="empty">${esc(text)}</p>`;
   }
 
-  async function copy(event) {
-    if (!report) return;
-    try {
-      await navigator.clipboard.writeText(report.text);
-    } catch {
-      const ta = document.createElement('textarea');
-      ta.value = report.text;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      ta.remove();
-    }
-    const btn = event.currentTarget;
-    btn.textContent = 'Copied';
-    setTimeout(() => { btn.textContent = 'Copy as text'; }, 1500);
+  async function refreshExpandedRunningLogs() {
+    if (!report || !Array.isArray(report.background_tasks)) return;
+    const targets = report.background_tasks.filter(
+      (t) => t.status === 'running' && expandedTaskIds.has(t.step_idx),
+    );
+    await Promise.all(targets.map((t) => fetchTaskLog(t.step_idx, false)));
   }
 
   async function refresh() {
@@ -231,14 +727,16 @@
       const qs = new URLSearchParams({ conversationId, workspace });
       const res = await doFetch(`/api/report?${qs}`);
       const data = await res.json();
-      if (data.error === 'no-conversation') return showMessage('Open a conversation to see its context usage.');
+      if (data.error === 'no-conversation') return showMessage('Open a conversation to see its status bar.');
       if (data.error === 'no-database') return showMessage('This conversation has no saved data yet. Send a message first.');
       if (data.error) return showMessage(`Couldn't read this conversation: ${data.message || data.error}`);
       const json = JSON.stringify(data);
-      if (json === lastJson) return;
-      lastJson = json;
-      report = data;
-      render(data);
+      if (json !== lastJson) {
+        lastJson = json;
+        report = data;
+        render(data);
+      }
+      await refreshExpandedRunningLogs();
     } catch {
       const dot = document.querySelector('.live');
       if (dot) dot.classList.remove('on');

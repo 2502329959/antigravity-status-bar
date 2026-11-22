@@ -6,7 +6,7 @@
 // catalog (GetAvailableModels), like the agy CLI.
 
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import { homedir } from 'node:os';
@@ -21,6 +21,7 @@ const CONVERSATIONS = join(GEMINI_DIR, 'antigravity', 'conversations');
 const DATA_DIR = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR || join(HERE, '.data');
 const CATALOG_PATH = join(DATA_DIR, 'model-catalog.json');
 const CATALOG_TTL_MS = 10 * 60 * 1000;
+const MAX_LOG_BYTES = 32 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const app = new SidecarApp();
@@ -115,7 +116,7 @@ async function refreshCatalog() {
       writeFileSync(CATALOG_PATH, JSON.stringify(catalog));
     }
   } catch (err) {
-    console.error('[context] model catalog unavailable, using built-in limits:', err.message);
+    console.error('[status-bar] model catalog unavailable, using built-in limits:', err.message);
   }
 }
 
@@ -163,11 +164,74 @@ async function report(conversationId, workspaceUri) {
   return result;
 }
 
+// --- task logs ----------------------------------------------------------------
+
+function readTaskLog(conversationId, stepIdx) {
+  const idxStr = String(stepIdx ?? '');
+  if (!UUID.test(conversationId || '') || !/^\d+$/.test(idxStr)) {
+    return { error: 'invalid-params' };
+  }
+  const logPath = join(
+    GEMINI_DIR,
+    'antigravity',
+    'brain',
+    conversationId,
+    '.system_generated',
+    'tasks',
+    `task-${idxStr}.log`,
+  );
+  if (!existsSync(logPath)) {
+    return { exists: false, content: '', size: 0, mtimeMs: 0, truncated: false };
+  }
+  const stat = statSync(logPath);
+  if (!stat.isFile()) {
+    return { exists: false, content: '', size: 0, mtimeMs: 0, truncated: false };
+  }
+  const truncated = stat.size > MAX_LOG_BYTES;
+  const toRead = Math.min(stat.size, MAX_LOG_BYTES);
+  const offset = stat.size - toRead;
+  let content = '';
+  if (toRead > 0) {
+    const buf = Buffer.allocUnsafe(toRead);
+    const fd = openSync(logPath, 'r');
+    try {
+      let readTotal = 0;
+      while (readTotal < toRead) {
+        const n = readSync(fd, buf, readTotal, toRead - readTotal, offset + readTotal);
+        if (n <= 0) break;
+        readTotal += n;
+      }
+      content = buf.subarray(0, readTotal).toString('utf8');
+      if (truncated) {
+        const nl = content.indexOf('\n');
+        if (nl !== -1 && nl < 256) content = content.slice(nl + 1);
+      }
+    } finally {
+      closeSync(fd);
+    }
+  }
+  return {
+    exists: true,
+    content,
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+    truncated,
+  };
+}
+
 app.page('/', () => new Response(readFileSync(join(HERE, 'index.html'), 'utf8'), { contentType: 'text/html' }));
 
 app.api('/api/report', async (data) => {
   try {
     return await report(data.conversationId, data.workspace);
+  } catch (err) {
+    return { error: 'failed', message: err.message };
+  }
+}, 'GET');
+
+app.api('/api/task-log', async (data) => {
+  try {
+    return readTaskLog(data.conversationId, data.stepIdx);
   } catch (err) {
     return { error: 'failed', message: err.message };
   }

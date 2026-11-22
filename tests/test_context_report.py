@@ -60,11 +60,12 @@ class ConversationDB:
         self.conn.execute("CREATE TABLE gen_metadata (idx integer, data blob, size integer NOT NULL DEFAULT 0, PRIMARY KEY (idx))")
         self.n = 0
 
-    def step(self, step_type: int, metadata: bytes = b"", payload_field: int | None = None, payload: bytes = b"", status: int = 3):
+    def step(self, step_type: int, metadata: bytes = b"", payload_field: int | None = None, payload: bytes = b"",
+             status: int = 3, task_details: bytes = b""):
         pb = m(f(1, step_type), f(4, status), f(5, metadata), f(payload_field, payload) if payload_field else b"")
         self.conn.execute(
-            "INSERT INTO steps (idx, step_type, status, metadata, step_payload) VALUES (?, ?, ?, ?, ?)",
-            (self.n, step_type, status, metadata, pb),
+            "INSERT INTO steps (idx, step_type, status, metadata, task_details, step_payload) VALUES (?, ?, ?, ?, ?, ?)",
+            (self.n, step_type, status, metadata, task_details or None, pb),
         )
         self.n += 1
 
@@ -339,6 +340,77 @@ class ReportTest(unittest.TestCase):
         lines = out.splitlines()
         self.assertEqual(lines[2], "Test Model · 300/200.0k tokens")  # stats above the grid
         self.assertTrue(lines[-3].startswith("□"))
+
+    # --- background tasks ---
+
+    def test_background_tasks_extraction(self):
+        log_file = self.home / "task-0.log"
+        log_file.write_text("line 1\nline 2\n", encoding="utf-8")
+        log_uri = log_file.as_uri()
+
+        def td(task_id: str, uri: str = "", preview: str = "", cmd: str = "", is_daemon: int = 0,
+               title: str = "", ts: int = 1795262200) -> bytes:
+            parts = [f(1, task_id), f(8, f(1, ts))]
+            if uri:
+                parts.append(f(2, uri))
+            if preview:
+                parts.append(f(3, preview))
+            if cmd:
+                parts.append(f(4, cmd))
+            if is_daemon:
+                parts.append(f(6, is_daemon))
+            if title:
+                parts.append(f(7, title))
+            return m(*parts)
+
+        # idx 0: cancelled command with log file
+        self.db.step(
+            GENERIC,
+            metadata=f(4, m(f(2, "run_command"), f(3, json.dumps({"CommandLine": "npm run build"})))),
+            status=6,
+            task_details=td("conv/task-0", uri=log_uri, preview="building...", cmd="npm run build", title="Build app"),
+        )
+        # idx 1: schedule timer with empty td.str(4), falls back to tool call JSON
+        self.db.step(
+            GENERIC,
+            metadata=f(4, m(f(2, "schedule"), f(3, json.dumps({"DurationSeconds": 30, "Prompt": "Check workers"})))),
+            status=3,
+            task_details=td("conv/task-1", title="30s timer", ts=1795262210),
+        )
+        # idx 2: running daemon command
+        self.db.step(
+            GENERIC,
+            metadata=f(4, m(f(2, "run_command"), f(3, json.dumps({"CommandLine": "python3 server.py", "IsDaemon": True})))),
+            status=2,
+            task_details=td("conv/task-2", preview="listening", cmd="python3 server.py", is_daemon=1, title="Dev server", ts=1795262220),
+        )
+        # idx 3: running normal command (newer running task should sort first)
+        self.db.step(
+            GENERIC,
+            metadata=f(4, m(f(2, "run_command"), f(3, json.dumps({"CommandLine": "pytest -q"})))),
+            status=2,
+            task_details=td("conv/task-3", cmd="pytest -q", title="Run tests", ts=1795262230),
+        )
+
+        tasks = self.report()["background_tasks"]
+        self.assertEqual([t["step_idx"] for t in tasks], [3, 2, 1, 0])
+
+        self.assertEqual(tasks[0]["status"], "running")
+        self.assertEqual(tasks[0]["command"], "pytest -q")
+        self.assertFalse(tasks[0]["is_daemon"])
+
+        self.assertEqual(tasks[1]["status"], "running")
+        self.assertTrue(tasks[1]["is_daemon"])
+        self.assertEqual(tasks[1]["tool"], "run_command")
+
+        self.assertEqual(tasks[2]["status"], "done")
+        self.assertEqual(tasks[2]["tool"], "schedule")
+        self.assertEqual(tasks[2]["command"], "Timer: 30s, Prompt: Check workers")
+
+        self.assertEqual(tasks[3]["status"], "cancelled")
+        self.assertTrue(tasks[3]["has_log"])
+        self.assertGreater(tasks[3]["log_size"], 0)
+        self.assertGreater(tasks[3]["log_mtime"], 0)
 
 
 class FormatTest(unittest.TestCase):

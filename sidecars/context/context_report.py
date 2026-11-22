@@ -153,13 +153,19 @@ def go_div4(n: int) -> int:
     return int(n / 4)
 
 
-def shorten_path(uri: str) -> str:
+def uri_to_path(uri: str) -> str:
+    """Convert a file:// URI to a local filesystem path."""
     p = uri
     if p.startswith("file:"):
         parsed = urlparse(p)
         p = unquote(parsed.path)
         if len(p) > 2 and p[0] == "/" and p[2] == ":":
             p = p[1:]
+    return p
+
+
+def shorten_path(uri: str) -> str:
+    p = uri_to_path(uri)
     home = str(Path.home())
     p = p.replace("\\", "/")
     home = home.replace("\\", "/")
@@ -209,12 +215,25 @@ def is_skill_file(path: str) -> bool:
 
 
 class Step:
-    def __init__(self, pos: int, payload: bytes, step_type: int, status: int, metadata: bytes | None):
+    def __init__(
+        self,
+        pos: int,
+        payload: bytes,
+        step_type: int,
+        status: int,
+        metadata: bytes | None,
+        idx: int | None = None,
+        task_details: bytes | None = None,
+        error_details: bytes | None = None,
+    ):
         self.pos = pos
+        self.idx = pos if idx is None else idx
         self.pb = Msg(payload)
         self.type = self.pb.int(1) if self.pb.has(1) else step_type
         self.status = self.pb.int(4) if self.pb.has(4) else status
         self.md = self.pb.msg(5) or Msg(metadata)
+        self.task_details = Msg(task_details) if task_details else None
+        self.error_details = error_details
         self.view_file_override: Msg | None = None
         if self.type == GENERIC_TYPE:
             self.rehydrate()
@@ -668,6 +687,89 @@ def render(st: dict, model: str, system_files: list[tuple[str, int]], term_width
     return "".join(parts)
 
 
+# --- background tasks --------------------------------------------------------
+
+TASK_STATUS_NAMES = {
+    2: "running",
+    3: "done",
+    4: "error",
+    6: "cancelled",
+}
+
+
+def _fallback_command_from_tool_call(tc: Msg | None) -> str:
+    if tc is None:
+        return ""
+    raw_args = tc.str(3)
+    if not raw_args:
+        return ""
+    try:
+        args = json.loads(raw_args)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(args, dict):
+        return ""
+    if isinstance(args.get("CommandLine"), str) and args["CommandLine"]:
+        return args["CommandLine"]
+    if "DurationSeconds" in args or "CronExpression" in args:
+        parts = []
+        if args.get("DurationSeconds") is not None:
+            parts.append(f"Timer: {args['DurationSeconds']}s")
+        if args.get("CronExpression"):
+            parts.append(f"Cron: {args['CronExpression']}")
+        if args.get("Prompt"):
+            parts.append(f"Prompt: {args['Prompt']}")
+        return ", ".join(parts)
+    return ""
+
+
+def extract_background_tasks(steps: list[Step]) -> list[dict]:
+    """Extract background tasks recorded in steps.task_details."""
+    tasks: list[dict] = []
+    for step in steps:
+        td = step.task_details
+        if td is None or not td.fields:
+            continue
+        tc = step.md.msg(4)
+        tool_name = tc.str(2) if tc is not None else ""
+        command = td.str(4) or _fallback_command_from_tool_call(tc)
+        log_uri = td.str(2)
+        log_path = uri_to_path(log_uri) if log_uri else ""
+        has_log = False
+        log_mtime = 0
+        log_size = 0
+        if log_path:
+            try:
+                if os.path.isfile(log_path):
+                    st_res = os.stat(log_path)
+                    has_log = True
+                    log_mtime = int(st_res.st_mtime)
+                    log_size = int(st_res.st_size)
+            except OSError:
+                pass
+        ts = td.msg(8)
+        started_at = ts.int(1) if ts is not None else 0
+        status_code = step.status
+        status = TASK_STATUS_NAMES.get(status_code, "unknown")
+        tasks.append({
+            "step_idx": step.idx,
+            "task_id": td.str(1),
+            "title": td.str(7),
+            "command": command,
+            "output_preview": td.str(3),
+            "status": status,
+            "status_code": status_code,
+            "is_daemon": bool(td.int(6)),
+            "tool": tool_name,
+            "started_at": started_at,
+            "has_log": has_log,
+            "log_mtime": log_mtime,
+            "log_size": log_size,
+        })
+    tasks.sort(key=lambda t: (t["status"] == "running", t["step_idx"]), reverse=True)
+    return tasks
+
+
 # --- main --------------------------------------------------------------------
 
 
@@ -675,8 +777,13 @@ def load(db_path: Path) -> tuple[list[Step], Msg | None]:
     uri = "file:" + db_path.as_posix() + "?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     try:
-        rows = conn.execute("SELECT idx, step_type, status, metadata, step_payload FROM steps ORDER BY idx").fetchall()
-        steps = [Step(pos, r[4] or b"", r[1], r[2], r[3]) for pos, r in enumerate(rows)]
+        rows = conn.execute(
+            "SELECT idx, step_type, status, metadata, step_payload, task_details, error_details FROM steps ORDER BY idx"
+        ).fetchall()
+        steps = [
+            Step(pos, r[4] or b"", r[1], r[2], r[3], idx=r[0], task_details=r[5], error_details=r[6])
+            for pos, r in enumerate(rows)
+        ]
         row = conn.execute("SELECT data FROM gen_metadata ORDER BY idx DESC LIMIT 1").fetchone()
     finally:
         conn.close()
@@ -817,6 +924,7 @@ def main():
             "artifact_files": [{"path": p, "tokens": t} for p, t in st["artifact_files"]],
             "skill_files": [{"path": p, "tokens": t} for p, t in st["skill_files"]],
             "system_files": [{"path": p} for p, _ in system_files],
+            "background_tasks": extract_background_tasks(steps),
         }, indent=2))
         return
 
