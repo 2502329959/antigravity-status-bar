@@ -2,11 +2,6 @@
 
 **简体中文** | [English](README.en.md)
 
-- **所属 Agent**：Antigravity
-- **目录性质**：持久化（长期保留）
-- **创建日期**：2026-11-21
-- **任务简述**：Fork 自 `dimitr-io/antigravity-desktop-context`，更名为「Antigravity 状态栏」，二次开发 Claude Code 风格分段上下文条、缓存与输出统计、多模型用量分布及后台任务/Subagent 实时监控。
-
 ---
 
 一款专为 **Antigravity 2.0 桌面端**打造的实时侧边状态栏插件——直接只读解析会话本地数据库（SQLite + Protobuf），**每次刷新消耗 0 Token**。
