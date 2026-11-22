@@ -1,5 +1,7 @@
 # Antigravity 状态栏（antigravity-status-bar）
 
+**简体中文** | [English](README.en.md)
+
 - **所属 Agent**：Antigravity
 - **目录性质**：持久化（长期保留）
 - **创建日期**：2026-11-21
