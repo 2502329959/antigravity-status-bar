@@ -508,6 +508,52 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(tasks[1]["status"], "cancelled")
         self.assertEqual(tasks[2]["status"], "done")
 
+    # --- multi-model usage ---
+
+    def test_multi_model_usage_breakdown(self):
+        self.basic_steps()
+        # 2 calls from planning/flagship model (one without model_id slug, matching display_name)
+        self.db.generation(
+            [group(7, 1000, ("0: USER_INPUT", 1000))],
+            usage=usage(input_tokens=1000, output=500, cache_read=4000, thinking=200),
+            model="",
+            display_name="Gemini 4 Hydrogen (XHigh)",
+        )
+        self.db.generation(
+            [group(7, 1000, ("0: USER_INPUT", 1000))],
+            usage=usage(input_tokens=500, output=500, cache_read=2000, thinking=100),
+            model="gemini-4-hydrogen-xhigh",
+            display_name="",
+        )
+        # 1 call from lighter execution model
+        self.db.generation(
+            [group(7, 1000, ("0: USER_INPUT", 1000))],
+            usage=usage(input_tokens=200, output=300, cache_read=1500, thinking=50),
+            model="gemini-4-neon-medium",
+            display_name="",
+        )
+
+        mu = self.report()["model_usage"]
+        self.assertEqual(len(mu), 2)
+
+        self.assertEqual(mu[0]["model"], "Gemini 4 Hydrogen (XHigh)")
+        self.assertEqual(mu[0]["model_id"], "gemini-4-hydrogen-xhigh")
+        self.assertEqual(mu[0]["calls"], 2)
+        self.assertEqual(mu[0]["input_tokens"], 1500)
+        self.assertEqual(mu[0]["cache_read_tokens"], 6000)
+        self.assertEqual(mu[0]["total_input_tokens"], 7500)
+        self.assertEqual(mu[0]["output_tokens"], 1000)
+        self.assertEqual(mu[0]["thinking_tokens"], 300)
+        self.assertEqual(mu[0]["total_tokens"], 8500)
+        self.assertEqual(mu[0]["cache_hit_rate"], 80.0)
+        self.assertEqual(mu[0]["share_pct"], 81.0)
+
+        self.assertEqual(mu[1]["model"], "Gemini 4 Neon (Medium)")
+        self.assertEqual(mu[1]["calls"], 1)
+        self.assertEqual(mu[1]["total_tokens"], 2000)
+        self.assertEqual(mu[1]["cache_hit_rate"], 88.2)
+        self.assertEqual(mu[1]["share_pct"], 19.0)
+
 
 class FormatTest(unittest.TestCase):
     def test_model_label(self):

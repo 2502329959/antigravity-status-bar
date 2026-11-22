@@ -933,10 +933,71 @@ def collect_output_stats(gens: list[Msg]) -> dict:
     }
 
 
+def collect_model_usage(gens: list[Msg], catalog: dict | None = None) -> list[dict]:
+    """Aggregate per-model call counts and token usage across gen_metadata."""
+    buckets: dict[str, dict] = {}
+    for g in gens:
+        chat = g.msg(1)
+        u = chat.msg(4) if chat is not None else None
+        if u is None:
+            continue
+        inp = u.int(2)
+        cache_read = u.int(5)
+        out = u.int(3)
+        thinking = u.int(9)
+        if inp + cache_read + out <= 0:
+            continue
+        mid = model_id(g)
+        catalog_display = ((catalog or {}).get(mid) or {}).get("displayName") or ""
+        chat_display = chat.str(21) if chat is not None else ""
+        display = catalog_display or model_name(g)
+        bucket_key = display.lower()
+        entry = buckets.get(bucket_key)
+        if entry is None:
+            entry = {
+                "model": display,
+                "model_id": mid,
+                "calls": 0,
+                "input_tokens": 0,
+                "cache_read_tokens": 0,
+                "output_tokens": 0,
+                "thinking_tokens": 0,
+            }
+            buckets[bucket_key] = entry
+        else:
+            if catalog_display or (chat_display and entry["model"].lower() == chat_display.lower()):
+                entry["model"] = catalog_display or chat_display
+            if mid and not entry["model_id"]:
+                entry["model_id"] = mid
+        entry["calls"] += 1
+        entry["input_tokens"] += inp
+        entry["cache_read_tokens"] += cache_read
+        entry["output_tokens"] += out
+        entry["thinking_tokens"] += thinking
+
+    results: list[dict] = []
+    for entry in buckets.values():
+        total_in = entry["input_tokens"] + entry["cache_read_tokens"]
+        total = total_in + entry["output_tokens"]
+        results.append({
+            **entry,
+            "total_input_tokens": total_in,
+            "total_tokens": total,
+            "cache_hit_rate": round(entry["cache_read_tokens"] / total_in * 100.0, 1) if total_in > 0 else None,
+            "share_pct": 0.0,
+        })
+    results.sort(key=lambda m: (m["total_tokens"], m["calls"]), reverse=True)
+    grand_total = sum(m["total_tokens"] for m in results)
+    if grand_total > 0:
+        for m in results:
+            m["share_pct"] = round(m["total_tokens"] / grand_total * 100.0, 1)
+    return results
+
+
 # --- main --------------------------------------------------------------------
 
 
-def load_db(db_path: Path) -> tuple[list[Step], Msg | None, dict, dict]:
+def load_db(db_path: Path, catalog: dict | None = None) -> tuple[list[Step], Msg | None, dict, dict, list[dict]]:
     uri = "file:" + db_path.as_posix() + "?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     try:
@@ -951,11 +1012,17 @@ def load_db(db_path: Path) -> tuple[list[Step], Msg | None, dict, dict]:
     finally:
         conn.close()
     gens = [Msg(r[0]) for r in gen_rows]
-    return steps, (gens[-1] if gens else None), collect_cache_stats(gens), collect_output_stats(gens)
+    return (
+        steps,
+        (gens[-1] if gens else None),
+        collect_cache_stats(gens),
+        collect_output_stats(gens),
+        collect_model_usage(gens, catalog=catalog),
+    )
 
 
 def load(db_path: Path) -> tuple[list[Step], Msg | None]:
-    steps, latest_gen, _, _ = load_db(db_path)
+    steps, latest_gen, _, _, _ = load_db(db_path)
     return steps, latest_gen
 
 
@@ -1055,11 +1122,12 @@ def main():
     if not db_path.is_file():
         raise SystemExit(f"Conversation database not found: {db_path}")
 
-    steps, gen, cache_stats, output_stats = load_db(db_path)
-    catalog_entry = {}
+    catalog = {}
     if args.model_catalog:
         with open(args.model_catalog, encoding="utf-8") as fh:
-            catalog_entry = json.load(fh).get(model_id(gen)) or {}
+            catalog = json.load(fh)
+    steps, gen, cache_stats, output_stats, model_usage = load_db(db_path, catalog=catalog)
+    catalog_entry = catalog.get(model_id(gen)) or {}
     limit = args.limit if args.limit > 0 else int(catalog_entry.get("maxTokens") or 0) or context_limit(gen)
     st = collect_stats(steps, gen, limit)
     model = catalog_entry.get("displayName") or model_name(gen)
@@ -1096,6 +1164,7 @@ def main():
             "background_tasks": extract_background_tasks(steps, db_path=db_path),
             "cache_stats": cache_stats,
             "output_stats": output_stats,
+            "model_usage": model_usage,
         }, indent=2))
         return
 
