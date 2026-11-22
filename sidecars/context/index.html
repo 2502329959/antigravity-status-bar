@@ -68,6 +68,7 @@
 
   /* Claude Code style segmented linear context bar */
   .ctx-bar-wrap { margin-bottom: 10px; }
+  .ctx-bar-track-wrap { position: relative; }
   .ctx-bar {
     height: 8px;
     width: 100%;
@@ -78,6 +79,21 @@
     overflow: hidden;
     gap: 1.5px;
     padding: 0;
+  }
+  .ctx-budget-tick {
+    position: absolute;
+    top: -2px;
+    bottom: -2px;
+    width: 1.5px;
+    background: color-mix(in srgb, var(--fg) 75%, transparent);
+    border-radius: 1px;
+    cursor: help;
+    z-index: 2;
+    transition: opacity .15s ease, transform .15s ease;
+  }
+  .ctx-budget-tick:hover {
+    transform: scaleX(1.6);
+    background: var(--fg);
   }
   .ctx-bar .seg {
     height: 100%;
@@ -198,6 +214,7 @@
   }
   .tag.daemon { color: var(--c-agent); border-color: color-mix(in srgb, var(--c-agent) 40%, transparent); }
   .tag.timer { color: var(--c-tool); border-color: color-mix(in srgb, var(--c-tool) 40%, transparent); }
+  .tag.subagent { color: var(--c-user); border-color: color-mix(in srgb, var(--c-user) 40%, transparent); }
   .task-time { font-size: 11px; color: var(--dim); flex: none; }
   .chevron {
     font-size: 10px; color: var(--dim); flex: none;
@@ -350,7 +367,7 @@
     }
   }
 
-  function buildBarSegments(r) {
+  function barLayout(r) {
     const raw = Array.isArray(r.grid_segments) ? r.grid_segments : [0, 0, 0, 0, 0];
     const sysMsgCat = (r.categories || []).find((c) => c.key === 'system_messages');
     const sysMsgTok = sysMsgCat ? sysMsgCat.tokens : 0;
@@ -359,12 +376,13 @@
     const nonZeroSum = values.reduce((a, b) => a + b, 0);
     const denom = Math.max(limit, nonZeroSum || 1);
 
-    return BAR_SEGMENT_DEFS.map((def, i) => {
+    const segs = BAR_SEGMENT_DEFS.map((def, i) => {
       const tokens = values[i];
       const pctOfLimit = r.limit_tokens > 0 ? (tokens / r.limit_tokens * 100) : (nonZeroSum ? tokens / nonZeroSum * 100 : 0);
       const widthPct = tokens > 0 ? (tokens / denom * 100) : 0;
       return { ...def, tokens, pctOfLimit, widthPct };
     }).filter((seg) => seg.tokens > 0);
+    return { segs, denom };
   }
 
   function defaultReadoutHtml(r) {
@@ -375,7 +393,7 @@
   }
 
   function contextBarHtml(r) {
-    const segs = buildBarSegments(r);
+    const { segs, denom } = barLayout(r);
     const barInner = segs.map((seg) => (
       `<span class="seg" data-seg="${esc(seg.key)}" `
       + `data-label="${esc(seg.label)}" data-color="${esc(seg.color)}" `
@@ -384,15 +402,29 @@
       + `title="${esc(seg.label)}: ${fmtTok(seg.tokens)} tokens (${seg.pctOfLimit.toFixed(1)}%)"></span>`
     )).join('');
 
+    let tickHtml = '';
+    if (r.request_budget_tokens > 0 && r.limit_tokens > 0 && r.request_budget_tokens < r.limit_tokens) {
+      const tickLeft = (r.request_budget_tokens / denom * 100).toFixed(3);
+      const budgetPct = (r.request_budget_tokens / r.limit_tokens * 100).toFixed(1);
+      tickHtml = `<span class="ctx-budget-tick" id="ctx-budget-tick" `
+        + `data-tokens="${r.request_budget_tokens}" data-pct="${budgetPct}" `
+        + `style="left:${tickLeft}%" `
+        + `title="裁剪/压缩阈值: ${fmtTok(r.request_budget_tokens)} tokens (${budgetPct}%)"></span>`;
+    }
+
     return `
       <div class="ctx-bar-wrap">
-        <div class="ctx-bar" id="ctx-bar">${barInner}</div>
+        <div class="ctx-bar-track-wrap">
+          <div class="ctx-bar" id="ctx-bar">${barInner}</div>
+          ${tickHtml}
+        </div>
         <div class="ctx-bar-readout" id="ctx-bar-readout">${defaultReadoutHtml(r)}</div>
       </div>`;
   }
 
   function bindBarHover(r) {
     const bar = document.getElementById('ctx-bar');
+    const tick = document.getElementById('ctx-budget-tick');
     const readout = document.getElementById('ctx-bar-readout');
     const tokenSection = document.getElementById('token-usage-section');
     if (!bar || !readout) return;
@@ -426,57 +458,76 @@
       el.addEventListener('mouseenter', () => activate(el.dataset.seg));
     });
     bar.addEventListener('mouseleave', reset);
+    if (tick) {
+      tick.addEventListener('mouseenter', () => {
+        readout.innerHTML = `<span class="dot-swatch" style="background:var(--fg)"></span>`
+          + `<strong>裁剪/压缩阈值</strong>`
+          + `<span class="num">${fmtTok(Number(tick.dataset.tokens))} tokens (${tick.dataset.pct}%)</span>`;
+      });
+      tick.addEventListener('mouseleave', reset);
+    }
   }
 
   function taskCardHtml(t) {
     const isExpanded = expandedTaskIds.has(t.step_idx);
+    const isSubagent = t.tool === 'invoke_subagent';
     const statusLabel = STATUS_LABELS[t.status] || t.status;
     const title = t.title || t.command || t.task_id || `Task #${t.step_idx}`;
     const badges = [];
     if (t.is_daemon) badges.push('<span class="tag daemon">Daemon</span>');
     if (t.tool === 'schedule') badges.push('<span class="tag timer">Timer</span>');
+    if (isSubagent) badges.push('<span class="tag subagent">Subagent</span>');
 
     let detailHtml = '';
     if (isExpanded) {
-      const logState = taskLogs.get(t.step_idx);
-      let logText = '';
-      let logHint = '';
-      if (logState && logState.loading && !logState.data) {
-        logText = '正在读取日志…';
-      } else if (logState && logState.error) {
-        logText = t.output_preview || `日志读取失败: ${logState.error}`;
-      } else if (logState && logState.data && logState.data.exists) {
-        logText = logState.data.content || '(日志文件为空)';
-        const mtimeSec = logState.data.mtimeMs ? Math.floor(logState.data.mtimeMs / 1000) : t.log_mtime;
-        const sizeVal = logState.data.size ?? t.log_size;
-        logHint = `${fmtBytes(sizeVal)}${mtimeSec ? ` · 更新于 ${fmtRelativeTime(mtimeSec)}` : ''}${logState.data.truncated ? ' · 仅显示末尾 32 KB' : ''}`;
-      } else {
-        logText = t.output_preview || '(暂无输出日志)';
-        if (t.has_log) logHint = `${fmtBytes(t.log_size)}`;
-      }
-
-      const cmdDisplay = t.command || '(无命令详情)';
-      detailHtml = `
-        <div class="task-detail">
-          <div class="task-meta-grid">
-            <span class="task-meta-item">状态: <strong>${esc(statusLabel)}</strong></span>
-            <span class="task-meta-item">启动: <strong>${esc(fmtDateTime(t.started_at))}</strong></span>
-            ${t.task_id ? `<span class="task-meta-item mono">ID: ${esc(t.task_id.split('/').pop())}</span>` : ''}
-          </div>
-          <div>
-            <div class="task-block-head">
-              <span>执行命令</span>
-              <button type="button" class="btn sm task-copy-cmd" data-step="${t.step_idx}">复制命令</button>
-            </div>
-            <pre class="code-box">${esc(cmdDisplay)}</pre>
-          </div>
+      let logBlockHtml = '';
+      if (!isSubagent) {
+        const logState = taskLogs.get(t.step_idx);
+        let logText = '';
+        let logHint = '';
+        if (logState && logState.loading && !logState.data) {
+          logText = '正在读取日志…';
+        } else if (logState && logState.error) {
+          logText = t.output_preview || `日志读取失败: ${logState.error}`;
+        } else if (logState && logState.data && logState.data.exists) {
+          logText = logState.data.content || '(日志文件为空)';
+          const mtimeSec = logState.data.mtimeMs ? Math.floor(logState.data.mtimeMs / 1000) : t.log_mtime;
+          const sizeVal = logState.data.size ?? t.log_size;
+          logHint = `${fmtBytes(sizeVal)}${mtimeSec ? ` · 更新于 ${fmtRelativeTime(mtimeSec)}` : ''}${logState.data.truncated ? ' · 仅显示末尾 32 KB' : ''}`;
+        } else {
+          logText = t.output_preview || '(暂无输出日志)';
+          if (t.has_log) logHint = `${fmtBytes(t.log_size)}`;
+        }
+        logBlockHtml = `
           <div>
             <div class="task-block-head">
               <span>执行输出${logHint ? ` · ${esc(logHint)}` : ''}</span>
               <button type="button" class="btn sm task-refresh-log" data-step="${t.step_idx}">刷新日志</button>
             </div>
             <pre class="code-box log-box" id="task-log-${t.step_idx}">${esc(logText)}</pre>
+          </div>`;
+      }
+
+      const cmdLabel = isSubagent ? '任务指令 (Prompt)' : '执行命令';
+      const copyLabel = isSubagent ? '复制指令' : '复制命令';
+      const cmdDisplay = t.command || (isSubagent ? '(无指令内容)' : '(无命令详情)');
+      const idDisplay = t.task_id ? (isSubagent ? t.task_id.slice(0, 8) : t.task_id.split('/').pop()) : '';
+      detailHtml = `
+        <div class="task-detail">
+          <div class="task-meta-grid">
+            <span class="task-meta-item">状态: <strong>${esc(statusLabel)}</strong></span>
+            ${isSubagent && t.subagent_type ? `<span class="task-meta-item">类型: <strong>${esc(t.subagent_type)}</strong></span>` : ''}
+            <span class="task-meta-item">启动: <strong>${esc(fmtDateTime(t.started_at))}</strong></span>
+            ${idDisplay ? `<span class="task-meta-item mono" title="${esc(t.task_id)}">ID: ${esc(idDisplay)}</span>` : ''}
           </div>
+          <div>
+            <div class="task-block-head">
+              <span>${cmdLabel}</span>
+              <button type="button" class="btn sm task-copy-cmd" data-step="${t.step_idx}">${copyLabel}</button>
+            </div>
+            <pre class="code-box">${esc(cmdDisplay)}</pre>
+          </div>
+          ${logBlockHtml}
         </div>`;
     }
 
@@ -532,7 +583,10 @@
         } else {
           expandedTaskIds.add(stepIdx);
           renderTasksOnly();
-          fetchTaskLog(stepIdx, false);
+          const task = (report.background_tasks || []).find((t) => t.step_idx === stepIdx);
+          if (task && task.tool !== 'invoke_subagent') {
+            fetchTaskLog(stepIdx, false);
+          }
         }
       });
     });
@@ -542,7 +596,7 @@
         e.stopPropagation();
         const stepIdx = Number(btn.dataset.step);
         const task = (report.background_tasks || []).find((t) => t.step_idx === stepIdx);
-        if (task) copyText(task.command || '', btn, '复制命令');
+        if (task) copyText(task.command || '', btn, task.tool === 'invoke_subagent' ? '复制指令' : '复制命令');
       });
     });
 
@@ -648,6 +702,22 @@
       + `</div>`;
   }
 
+  function outputRowHtml(r) {
+    const os = r.output_stats;
+    if (!os || !os.session_output_tokens) return '';
+    const hasThink = os.session_thinking_tokens > 0;
+    const thinkSub = hasThink ? `<span class="cache-sub-inline"> · 思考 ${fmtTok(os.session_thinking_tokens)}</span>` : '';
+    const pctStr = hasThink && typeof os.thinking_pct === 'number' ? `${os.thinking_pct.toFixed(1)}%` : '';
+    const title = `本会话累计输出: ${fmtTok(os.session_output_tokens)} (思考 ${fmtTok(os.session_thinking_tokens)} / 回复 ${fmtTok(os.session_response_tokens)})`
+      + ` · 最近一轮: ${fmtTok(os.last_output_tokens)} (思考 ${fmtTok(os.last_thinking_tokens)})`;
+    return `<div class="row output-row" title="${esc(title)}">`
+      + `<span class="mark" style="background:var(--c-agent)"></span>`
+      + `<span>Output${thinkSub}</span>`
+      + `<span class="tok num dim">${fmtTok(os.session_output_tokens)}</span>`
+      + `<span class="p num">${pctStr}</span>`
+      + `</div>`;
+  }
+
   function categories(r) {
     const conv = r.categories.filter((c) => CONVERSATION[c.key]);
     const rest = r.categories.filter((c) => !CONVERSATION[c.key]);
@@ -661,7 +731,7 @@
     return `<section id="token-usage-section"><h2>Token usage</h2>${contextBarHtml(r)}${note}
       <div class="group">${conv.map(categoryRow).join('')}</div>
       ${rest.length ? `<div class="group">${rest.map(categoryRow).join('')}</div>` : ''}
-      <div class="group">${free}${cacheRowHtml(r)}</div>${buffer}</section>`;
+      <div class="group">${free}${cacheRowHtml(r)}${outputRowHtml(r)}</div>${buffer}</section>`;
   }
 
   function checkpoints(r) {
@@ -728,7 +798,7 @@
   async function refreshExpandedRunningLogs() {
     if (!report || !Array.isArray(report.background_tasks)) return;
     const targets = report.background_tasks.filter(
-      (t) => t.status === 'running' && expandedTaskIds.has(t.step_idx),
+      (t) => t.status === 'running' && t.tool !== 'invoke_subagent' && expandedTaskIds.has(t.step_idx),
     );
     await Promise.all(targets.map((t) => fetchTaskLog(t.step_idx, false)));
   }

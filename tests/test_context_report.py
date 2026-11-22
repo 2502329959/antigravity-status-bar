@@ -95,8 +95,13 @@ def planner(text: str) -> bytes:
     return f(1, text)
 
 
-def usage(input_tokens: int = 0, output: int = 0, cache_read: int = 0) -> bytes:
-    return m(f(2, input_tokens), f(3, output), f(5, cache_read))
+def usage(input_tokens: int = 0, output: int = 0, cache_read: int = 0, thinking: int = 0, response: int = 0) -> bytes:
+    parts = [f(2, input_tokens), f(3, output), f(5, cache_read)]
+    if thinking:
+        parts.append(f(9, thinking))
+    if response:
+        parts.append(f(10, response))
+    return m(*parts)
 
 
 def tool_call(args: str) -> bytes:
@@ -438,6 +443,70 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(cs["session_cache_read_tokens"], 1700)
         self.assertEqual(cs["session_input_tokens"], 1300)
         self.assertEqual(cs["session_total_input_tokens"], 3000)
+
+    def test_output_and_thinking_stats(self):
+        self.basic_steps()
+        self.db.generation(
+            [group(7, 1000, ("0: USER_INPUT", 1000))],
+            usage=usage(input_tokens=100, output=1000, cache_read=900, thinking=600, response=400),
+        )
+        self.db.generation(
+            [group(7, 1000, ("0: USER_INPUT", 1000))],
+            usage=usage(input_tokens=100, output=500, cache_read=900, thinking=150, response=350),
+        )
+        os_stats = self.report()["output_stats"]
+        self.assertEqual(os_stats["session_output_tokens"], 1500)
+        self.assertEqual(os_stats["session_thinking_tokens"], 750)
+        self.assertEqual(os_stats["session_response_tokens"], 750)
+        self.assertEqual(os_stats["thinking_pct"], 50.0)
+        self.assertEqual(os_stats["last_output_tokens"], 500)
+        self.assertEqual(os_stats["last_thinking_tokens"], 150)
+
+    def test_subagent_tasks_extraction(self):
+        sub_running_id = "11111111-1111-1111-1111-111111111111"
+        sub_done_id = "22222222-2222-2222-2222-222222222222"
+        sub_killed_id = "33333333-3333-3333-3333-333333333333"
+
+        # Sibling DB for running subagent (has a step with status=2)
+        sub_running_db = ConversationDB(self.home / f"{sub_running_id}.db")
+        sub_running_db.step(GENERIC, status=2)
+        sub_running_db.close()
+
+        # Sibling DB for finished subagent (steps all status=3)
+        sub_done_db = ConversationDB(self.home / f"{sub_done_id}.db")
+        sub_done_db.step(GENERIC, status=3)
+        sub_done_db.close()
+
+        def sub_step(cid: str, role: str, type_name: str, prompt: str, ts: int):
+            md = m(
+                f(1, f(1, ts)),
+                f(4, m(f(2, "invoke_subagent"), f(3, json.dumps({"Role": role, "TypeName": type_name, "Prompt": prompt})))),
+            )
+            res = f(1, f'Created the following subagent:\n{{\n  "conversationId": "{cid}"\n}}')
+            self.db.step(GENERIC, metadata=md, payload_field=140, payload=f(2, res), status=3)
+
+        sub_step(sub_done_id, "Codebase Researcher", "research", "Inspect parser", 1795262000)
+        sub_step(sub_killed_id, "Temp Explorer", "research", "Explore logs", 1795262010)
+        sub_step(sub_running_id, "Live Worker", "self", "Watch files", 1795262020)
+
+        # Later manage_subagents kill for sub_killed_id
+        self.db.step(
+            GENERIC,
+            metadata=f(4, m(f(2, "manage_subagents"), f(3, json.dumps({"Action": "kill", "ConversationIds": [sub_killed_id]})))),
+            status=3,
+        )
+
+        tasks = self.report()["background_tasks"]
+        # Running subagent sorted first, then newer finished/cancelled subagents by step_idx desc
+        self.assertEqual([t["task_id"] for t in tasks], [sub_running_id, sub_killed_id, sub_done_id])
+        self.assertEqual(tasks[0]["status"], "running")
+        self.assertEqual(tasks[0]["tool"], "invoke_subagent")
+        self.assertEqual(tasks[0]["title"], "Live Worker")
+        self.assertEqual(tasks[0]["subagent_type"], "self")
+        self.assertEqual(tasks[0]["command"], "Watch files")
+
+        self.assertEqual(tasks[1]["status"], "cancelled")
+        self.assertEqual(tasks[2]["status"], "done")
 
 
 class FormatTest(unittest.TestCase):

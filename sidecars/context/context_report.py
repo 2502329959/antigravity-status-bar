@@ -697,17 +697,21 @@ TASK_STATUS_NAMES = {
 }
 
 
+def _parse_json_dict(raw: str) -> dict:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _fallback_command_from_tool_call(tc: Msg | None) -> str:
     if tc is None:
         return ""
-    raw_args = tc.str(3)
-    if not raw_args:
-        return ""
-    try:
-        args = json.loads(raw_args)
-    except json.JSONDecodeError:
-        return ""
-    if not isinstance(args, dict):
+    args = _parse_json_dict(tc.str(3))
+    if not args:
         return ""
     if isinstance(args.get("CommandLine"), str) and args["CommandLine"]:
         return args["CommandLine"]
@@ -723,54 +727,138 @@ def _fallback_command_from_tool_call(tc: Msg | None) -> str:
     return ""
 
 
-def extract_background_tasks(steps: list[Step]) -> list[dict]:
-    """Extract background tasks recorded in steps.task_details."""
+def _subagent_db_status(db_path: Path | None, sub_conv_id: str) -> str:
+    if db_path is None or not sub_conv_id or not re.fullmatch(r"[0-9a-fA-F-]+", sub_conv_id):
+        return "done"
+    sub_db = db_path.parent / f"{sub_conv_id}.db"
+    if not sub_db.is_file():
+        return "done"
+    try:
+        conn = sqlite3.connect("file:" + sub_db.as_posix() + "?mode=ro", uri=True)
+        try:
+            rows = conn.execute("SELECT status FROM steps ORDER BY idx DESC LIMIT 5").fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return "done"
+    if not rows:
+        return "running"
+    statuses = [r[0] for r in rows]
+    if any(s == 2 for s in statuses):
+        return "running"
+    latest = statuses[0]
+    if latest == 4:
+        return "error"
+    if latest == 6:
+        return "cancelled"
+    return "done"
+
+
+def extract_background_tasks(steps: list[Step], db_path: Path | None = None) -> list[dict]:
+    """Extract background tasks (commands, timers) and subagents from steps."""
+    killed_subagents: dict[str, int] = {}
+    latest_kill_all_idx = -1
+    for step in steps:
+        tc = step.md.msg(4)
+        if tc is None or tc.str(2) != "manage_subagents":
+            continue
+        args = _parse_json_dict(tc.str(3))
+        action = args.get("Action")
+        if action == "kill_all":
+            latest_kill_all_idx = max(latest_kill_all_idx, step.idx)
+        elif action == "kill":
+            for cid in args.get("ConversationIds") or []:
+                if isinstance(cid, str) and cid:
+                    killed_subagents[cid] = max(killed_subagents.get(cid, -1), step.idx)
+
     tasks: list[dict] = []
     for step in steps:
         td = step.task_details
-        if td is None or not td.fields:
-            continue
         tc = step.md.msg(4)
         tool_name = tc.str(2) if tc is not None else ""
-        command = td.str(4) or _fallback_command_from_tool_call(tc)
-        log_uri = td.str(2)
-        log_path = uri_to_path(log_uri) if log_uri else ""
-        has_log = False
-        log_mtime = 0
-        log_size = 0
-        if log_path:
-            try:
-                if os.path.isfile(log_path):
-                    st_res = os.stat(log_path)
-                    has_log = True
-                    log_mtime = int(st_res.st_mtime)
-                    log_size = int(st_res.st_size)
-            except OSError:
-                pass
-        ts = td.msg(8)
-        started_at = ts.int(1) if ts is not None else 0
-        status_code = step.status
-        status = TASK_STATUS_NAMES.get(status_code, "unknown")
-        tasks.append({
-            "step_idx": step.idx,
-            "task_id": td.str(1),
-            "title": td.str(7),
-            "command": command,
-            "output_preview": td.str(3),
-            "status": status,
-            "status_code": status_code,
-            "is_daemon": bool(td.int(6)),
-            "tool": tool_name,
-            "started_at": started_at,
-            "has_log": has_log,
-            "log_mtime": log_mtime,
-            "log_size": log_size,
-        })
+
+        if td is not None and td.fields:
+            command = td.str(4) or _fallback_command_from_tool_call(tc)
+            log_uri = td.str(2)
+            log_path = uri_to_path(log_uri) if log_uri else ""
+            has_log = False
+            log_mtime = 0
+            log_size = 0
+            if log_path:
+                try:
+                    if os.path.isfile(log_path):
+                        st_res = os.stat(log_path)
+                        has_log = True
+                        log_mtime = int(st_res.st_mtime)
+                        log_size = int(st_res.st_size)
+                except OSError:
+                    pass
+            ts = td.msg(8)
+            started_at = ts.int(1) if ts is not None else 0
+            status_code = step.status
+            status = TASK_STATUS_NAMES.get(status_code, "unknown")
+            tasks.append({
+                "step_idx": step.idx,
+                "task_id": td.str(1),
+                "title": td.str(7),
+                "command": command,
+                "output_preview": td.str(3),
+                "status": status,
+                "status_code": status_code,
+                "is_daemon": bool(td.int(6)),
+                "tool": tool_name,
+                "started_at": started_at,
+                "has_log": has_log,
+                "log_mtime": log_mtime,
+                "log_size": log_size,
+            })
+        elif step.type == 127 or tool_name == "invoke_subagent":
+            args = _parse_json_dict(tc.str(3) if tc is not None else "")
+            role = args.get("Role") if isinstance(args.get("Role"), str) else ""
+            type_name = args.get("TypeName") if isinstance(args.get("TypeName"), str) else ""
+            prompt = args.get("Prompt") if isinstance(args.get("Prompt"), str) else ""
+
+            gen_step = step.pb.msg(STEP_GENERIC)
+            res = gen_step.msg(2) if gen_step is not None else None
+            res_text = res.str(1) if res is not None else ""
+            m_cid = re.search(r'"conversationId"\s*:\s*"([0-9a-fA-F-]+)"', res_text)
+            sub_conv_id = m_cid.group(1) if m_cid else ""
+
+            if step.status == 2:
+                status = "running"
+            elif step.status == 4:
+                status = "error"
+            elif step.status == 6:
+                status = "cancelled"
+            elif latest_kill_all_idx > step.idx or (sub_conv_id and killed_subagents.get(sub_conv_id, -1) > step.idx):
+                status = "cancelled"
+            else:
+                status = _subagent_db_status(db_path, sub_conv_id)
+
+            ts = step.md.msg(1)
+            started_at = ts.int(1) if ts is not None else 0
+            tasks.append({
+                "step_idx": step.idx,
+                "task_id": sub_conv_id or f"subagent-{step.idx}",
+                "title": role or type_name or "Subagent",
+                "command": prompt,
+                "output_preview": "",
+                "status": status,
+                "status_code": step.status,
+                "is_daemon": False,
+                "tool": "invoke_subagent",
+                "subagent_type": type_name,
+                "started_at": started_at,
+                "has_log": False,
+                "log_mtime": 0,
+                "log_size": 0,
+            })
+
     tasks.sort(key=lambda t: (t["status"] == "running", t["step_idx"]), reverse=True)
     return tasks
 
 
-# --- cache stats -------------------------------------------------------------
+# --- cache & output stats ----------------------------------------------------
 
 
 def collect_cache_stats(gens: list[Msg]) -> dict:
@@ -811,10 +899,44 @@ def collect_cache_stats(gens: list[Msg]) -> dict:
     }
 
 
+def collect_output_stats(gens: list[Msg]) -> dict:
+    """Compute session-cumulative and latest-turn output & thinking tokens from gen_metadata."""
+    session_output = 0
+    session_thinking = 0
+    session_response = 0
+    last_output = 0
+    last_thinking = 0
+
+    for g in gens:
+        chat = g.msg(1)
+        u = chat.msg(4) if chat is not None else None
+        if u is None:
+            continue
+        out = u.int(3)
+        if out <= 0:
+            continue
+        thinking = u.int(9)
+        resp = u.int(10)
+        session_output += out
+        session_thinking += thinking
+        session_response += resp if resp > 0 else max(0, out - thinking)
+        last_output = out
+        last_thinking = thinking
+
+    return {
+        "session_output_tokens": session_output,
+        "session_thinking_tokens": session_thinking,
+        "session_response_tokens": session_response,
+        "thinking_pct": round(session_thinking / session_output * 100.0, 1) if session_output > 0 else None,
+        "last_output_tokens": last_output,
+        "last_thinking_tokens": last_thinking,
+    }
+
+
 # --- main --------------------------------------------------------------------
 
 
-def load_db(db_path: Path) -> tuple[list[Step], Msg | None, dict]:
+def load_db(db_path: Path) -> tuple[list[Step], Msg | None, dict, dict]:
     uri = "file:" + db_path.as_posix() + "?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     try:
@@ -829,11 +951,11 @@ def load_db(db_path: Path) -> tuple[list[Step], Msg | None, dict]:
     finally:
         conn.close()
     gens = [Msg(r[0]) for r in gen_rows]
-    return steps, (gens[-1] if gens else None), collect_cache_stats(gens)
+    return steps, (gens[-1] if gens else None), collect_cache_stats(gens), collect_output_stats(gens)
 
 
 def load(db_path: Path) -> tuple[list[Step], Msg | None]:
-    steps, latest_gen, _ = load_db(db_path)
+    steps, latest_gen, _, _ = load_db(db_path)
     return steps, latest_gen
 
 
@@ -933,7 +1055,7 @@ def main():
     if not db_path.is_file():
         raise SystemExit(f"Conversation database not found: {db_path}")
 
-    steps, gen, cache_stats = load_db(db_path)
+    steps, gen, cache_stats, output_stats = load_db(db_path)
     catalog_entry = {}
     if args.model_catalog:
         with open(args.model_catalog, encoding="utf-8") as fh:
@@ -971,8 +1093,9 @@ def main():
             "artifact_files": [{"path": p, "tokens": t} for p, t in st["artifact_files"]],
             "skill_files": [{"path": p, "tokens": t} for p, t in st["skill_files"]],
             "system_files": [{"path": p} for p, _ in system_files],
-            "background_tasks": extract_background_tasks(steps),
+            "background_tasks": extract_background_tasks(steps, db_path=db_path),
             "cache_stats": cache_stats,
+            "output_stats": output_stats,
         }, indent=2))
         return
 
