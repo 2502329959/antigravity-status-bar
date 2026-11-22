@@ -412,6 +412,33 @@ class ReportTest(unittest.TestCase):
         self.assertGreater(tasks[3]["log_size"], 0)
         self.assertGreater(tasks[3]["log_mtime"], 0)
 
+    # --- prompt cache hit rate ---
+
+    def test_cache_hit_rate_stats(self):
+        self.basic_steps()
+        empty = self.report()["cache_stats"]
+        self.assertEqual(empty["generations"], 0)
+        self.assertIsNone(empty["last_hit_rate"])
+        self.assertIsNone(empty["session_hit_rate"])
+
+        # Re-open DB and add 3 generations with explicit uncached input + cache_read usage.
+        self.db = ConversationDB.__new__(ConversationDB)
+        self.db.conn = sqlite3.connect(self.db_path)
+        self.db.generation([group(7, 1000, ("0: USER_INPUT", 1000))], usage=usage(input_tokens=1000, cache_read=0))
+        self.db.generation([group(7, 1000, ("0: USER_INPUT", 1000))], usage=usage(input_tokens=200, cache_read=800))
+        self.db.generation([group(7, 1000, ("0: USER_INPUT", 1000))], usage=usage(input_tokens=100, cache_read=900))
+
+        cs = self.report()["cache_stats"]
+        self.assertEqual(cs["generations"], 3)
+        self.assertEqual(cs["last_hit_rate"], 90.0)
+        self.assertEqual(cs["last_cache_read_tokens"], 900)
+        self.assertEqual(cs["last_input_tokens"], 100)
+        self.assertEqual(cs["last_total_input_tokens"], 1000)
+        self.assertEqual(cs["session_hit_rate"], 56.7)
+        self.assertEqual(cs["session_cache_read_tokens"], 1700)
+        self.assertEqual(cs["session_input_tokens"], 1300)
+        self.assertEqual(cs["session_total_input_tokens"], 3000)
+
 
 class FormatTest(unittest.TestCase):
     def test_model_label(self):

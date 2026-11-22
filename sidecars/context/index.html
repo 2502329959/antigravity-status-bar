@@ -118,6 +118,57 @@
   .ctx-legend-item.active { color: var(--fg); }
   .ctx-legend-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
 
+  /* prompt cache hit rate */
+  .cache-card {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .cache-card.is-empty {
+    display: block;
+    font-size: 11.5px;
+    color: var(--dim);
+    padding: 6px 10px;
+  }
+  .cache-metric { min-width: 0; }
+  .cache-metric + .cache-metric {
+    border-left: 1px solid var(--line);
+    padding-left: 10px;
+  }
+  .cache-metric-top {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 6px;
+    margin-bottom: 4px;
+  }
+  .cache-label { font-size: 11px; color: var(--dim); white-space: nowrap; }
+  .cache-pct { font-size: 13px; font-weight: 600; }
+  .cache-track {
+    height: 4px;
+    border-radius: 999px;
+    background: var(--empty);
+    overflow: hidden;
+    margin-bottom: 4px;
+  }
+  .cache-fill {
+    height: 100%;
+    border-radius: 999px;
+    transition: width .25s ease;
+  }
+  .cache-sub {
+    font-size: 10.5px;
+    color: var(--dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   /* sections */
   section { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 10px; }
   h2 {
@@ -676,6 +727,41 @@
     return `<section><h2>${title} <span class="hint">${hint}</span></h2><ul class="files">${rows}</ul></section>`;
   }
 
+  function cacheRateColor(rate) {
+    if (rate >= 80) return 'var(--c-custom)';
+    if (rate >= 40) return 'var(--c-tool)';
+    return 'var(--c-sysmsg)';
+  }
+
+  function cacheMetricHtml(label, rate, subText) {
+    const hasRate = typeof rate === 'number' && !Number.isNaN(rate);
+    const pctVal = hasRate ? Math.max(0, Math.min(100, rate)) : 0;
+    const color = hasRate ? cacheRateColor(pctVal) : 'var(--dim)';
+    return `
+      <div class="cache-metric">
+        <div class="cache-metric-top">
+          <span class="cache-label">${esc(label)}</span>
+          <span class="cache-pct num" style="color:${color}">${hasRate ? `${pctVal.toFixed(1)}%` : '-'}</span>
+        </div>
+        <div class="cache-track"><div class="cache-fill" style="width:${pctVal.toFixed(1)}%;background:${color}"></div></div>
+        <div class="cache-sub num" title="${esc(subText)}">${esc(subText)}</div>
+      </div>`;
+  }
+
+  function cacheStatsHtml(r) {
+    const cs = r.cache_stats;
+    if (!cs || !cs.generations) {
+      return '<div class="cache-card is-empty">缓存命中率：暂无模型调用数据</div>';
+    }
+    const latestSub = `命中 ${fmtTok(cs.last_cache_read_tokens)} / ${fmtTok(cs.last_total_input_tokens)}`;
+    const sessionSub = `${cs.generations} 次调用 · 命中 ${fmtTok(cs.session_cache_read_tokens)} / ${fmtTok(cs.session_total_input_tokens)}`;
+    return `
+      <div class="cache-card">
+        ${cacheMetricHtml('最近缓存命中', cs.last_hit_rate, latestSub)}
+        ${cacheMetricHtml('会话累计命中', cs.session_hit_rate, sessionSub)}
+      </div>`;
+  }
+
   function render(r) {
     const scrollY = window.scrollY;
     const limit = r.limit_tokens;
@@ -690,6 +776,7 @@
         ${limit ? `<span class="pct num">${r.used_pct.toFixed(1)}%</span>` : ''}
       </div>
       ${contextBarHtml(r)}
+      ${cacheStatsHtml(r)}
       ${tasksSectionHtml(r)}
       ${categories(r)}
       ${checkpoints(r)}

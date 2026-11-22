@@ -770,10 +770,51 @@ def extract_background_tasks(steps: list[Step]) -> list[dict]:
     return tasks
 
 
+# --- cache stats -------------------------------------------------------------
+
+
+def collect_cache_stats(gens: list[Msg]) -> dict:
+    """Compute latest-turn and session-cumulative prompt cache hit rates from gen_metadata."""
+    generations = 0
+    session_input = 0
+    session_cache_read = 0
+    last_input = 0
+    last_cache_read = 0
+
+    for g in gens:
+        chat = g.msg(1)
+        u = chat.msg(4) if chat is not None else None
+        if u is None:
+            continue
+        inp = u.int(2)
+        cache_read = u.int(5)
+        if inp + cache_read <= 0:
+            continue
+        generations += 1
+        session_input += inp
+        session_cache_read += cache_read
+        last_input = inp
+        last_cache_read = cache_read
+
+    last_total_input = last_input + last_cache_read
+    session_total_input = session_input + session_cache_read
+    return {
+        "generations": generations,
+        "last_hit_rate": round(last_cache_read / last_total_input * 100.0, 1) if last_total_input > 0 else None,
+        "last_cache_read_tokens": last_cache_read,
+        "last_input_tokens": last_input,
+        "last_total_input_tokens": last_total_input,
+        "session_hit_rate": round(session_cache_read / session_total_input * 100.0, 1) if session_total_input > 0 else None,
+        "session_cache_read_tokens": session_cache_read,
+        "session_input_tokens": session_input,
+        "session_total_input_tokens": session_total_input,
+    }
+
+
 # --- main --------------------------------------------------------------------
 
 
-def load(db_path: Path) -> tuple[list[Step], Msg | None]:
+def load_db(db_path: Path) -> tuple[list[Step], Msg | None, dict]:
     uri = "file:" + db_path.as_posix() + "?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     try:
@@ -784,10 +825,16 @@ def load(db_path: Path) -> tuple[list[Step], Msg | None]:
             Step(pos, r[4] or b"", r[1], r[2], r[3], idx=r[0], task_details=r[5], error_details=r[6])
             for pos, r in enumerate(rows)
         ]
-        row = conn.execute("SELECT data FROM gen_metadata ORDER BY idx DESC LIMIT 1").fetchone()
+        gen_rows = conn.execute("SELECT data FROM gen_metadata ORDER BY idx").fetchall()
     finally:
         conn.close()
-    return steps, (Msg(row[0]) if row else None)
+    gens = [Msg(r[0]) for r in gen_rows]
+    return steps, (gens[-1] if gens else None), collect_cache_stats(gens)
+
+
+def load(db_path: Path) -> tuple[list[Step], Msg | None]:
+    steps, latest_gen, _ = load_db(db_path)
+    return steps, latest_gen
 
 
 # Native context windows from the model catalog, which the CLI fetches from the server
@@ -886,7 +933,7 @@ def main():
     if not db_path.is_file():
         raise SystemExit(f"Conversation database not found: {db_path}")
 
-    steps, gen = load(db_path)
+    steps, gen, cache_stats = load_db(db_path)
     catalog_entry = {}
     if args.model_catalog:
         with open(args.model_catalog, encoding="utf-8") as fh:
@@ -925,6 +972,7 @@ def main():
             "skill_files": [{"path": p, "tokens": t} for p, t in st["skill_files"]],
             "system_files": [{"path": p} for p, _ in system_files],
             "background_tasks": extract_background_tasks(steps),
+            "cache_stats": cache_stats,
         }, indent=2))
         return
 
