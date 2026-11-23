@@ -797,7 +797,11 @@
     const rows = models.map((m, i) => {
       const color = MODEL_COLORS[i % MODEL_COLORS.length];
       const hitStr = typeof m.cache_hit_rate === 'number' ? ` · 缓存命中 ${m.cache_hit_rate.toFixed(1)}%` : '';
-      const tip = `调用 ${m.calls} 次 · 输入 ${fmtTok(m.total_input_tokens)}${hitStr} · 输出 ${fmtTok(m.output_tokens)} (思考 ${fmtTok(m.thinking_tokens)})`;
+      const effortEntries = m.efforts && typeof m.efforts === 'object' ? Object.entries(m.efforts) : [];
+      const effortStr = effortEntries.length
+        ? ` · 思考强度: ${effortEntries.map(([k, v]) => `${k} ${v}次`).join(', ')}`
+        : '';
+      const tip = `调用 ${m.calls} 次 · 输入 ${fmtTok(m.total_input_tokens)}${hitStr} · 输出 ${fmtTok(m.output_tokens)} (思考 ${fmtTok(m.thinking_tokens)})${effortStr}`;
       return `<div class="row" title="${esc(tip)}">`
         + `<span class="mark" style="background:${color}"></span>`
         + `<span class="model-row-name">${esc(m.model)}<span class="cache-sub-inline"> · ${m.calls}次</span></span>`

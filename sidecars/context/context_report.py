@@ -933,8 +933,36 @@ def collect_output_stats(gens: list[Msg]) -> dict:
     }
 
 
+def base_model_id(slug: str) -> str:
+    """Strip trailing effort suffix from a model slug: gemini-4-hydrogen-high -> gemini-4-hydrogen."""
+    parts = slug.split("-")
+    if len(parts) > 1 and parts[-1].lower() in EFFORT_LEVELS:
+        return "-".join(parts[:-1])
+    return slug
+
+
+def split_model_effort(name: str) -> tuple[str, str]:
+    """Split a model display name into (base_name, effort_label).
+
+    Only strips known thinking/reasoning effort levels so non-effort suffixes
+    such as 'Orchestrator (Carbon)' remain intact.
+    """
+    text = name.strip()
+    m = EFFORT_DISPLAY_RE.search(text)
+    if m:
+        effort_raw = re.sub(r"\s+", " ", m.group(1)).strip()
+        effort = "XHigh" if effort_raw.lower() in ("xhigh", "extra high") else effort_raw.capitalize()
+        base = text[:m.start()].strip()
+        return (base or text), effort
+    if " " not in text and "-" in text:
+        parts = text.split("-")
+        if len(parts) > 1 and parts[-1].lower() in EFFORT_LEVELS:
+            return "-".join(parts[:-1]), ("XHigh" if parts[-1].lower() == "xhigh" else parts[-1].capitalize())
+    return text, ""
+
+
 def collect_model_usage(gens: list[Msg], catalog: dict | None = None) -> list[dict]:
-    """Aggregate per-model call counts and token usage across gen_metadata."""
+    """Aggregate per-model call counts and token usage across gen_metadata, grouped by base model."""
     buckets: dict[str, dict] = {}
     for g in gens:
         chat = g.msg(1)
@@ -948,39 +976,48 @@ def collect_model_usage(gens: list[Msg], catalog: dict | None = None) -> list[di
         if inp + cache_read + out <= 0:
             continue
         mid = model_id(g)
+        base_mid = base_model_id(mid) if mid else ""
         catalog_display = ((catalog or {}).get(mid) or {}).get("displayName") or ""
         chat_display = chat.str(21) if chat is not None else ""
-        display = catalog_display or model_name(g)
+        raw_display = catalog_display or model_name(g)
+        display, effort = split_model_effort(raw_display)
+        base_catalog, _ = split_model_effort(catalog_display) if catalog_display else ("", "")
+        base_chat, _ = split_model_effort(chat_display) if chat_display else ("", "")
         bucket_key = display.lower()
         entry = buckets.get(bucket_key)
         if entry is None:
             entry = {
                 "model": display,
-                "model_id": mid,
+                "model_id": base_mid,
                 "calls": 0,
                 "input_tokens": 0,
                 "cache_read_tokens": 0,
                 "output_tokens": 0,
                 "thinking_tokens": 0,
+                "efforts": {},
             }
             buckets[bucket_key] = entry
         else:
-            if catalog_display or (chat_display and entry["model"].lower() == chat_display.lower()):
-                entry["model"] = catalog_display or chat_display
-            if mid and not entry["model_id"]:
-                entry["model_id"] = mid
+            if base_catalog or (base_chat and entry["model"].lower() == base_chat.lower()):
+                entry["model"] = base_catalog or base_chat
+            if base_mid and not entry["model_id"]:
+                entry["model_id"] = base_mid
         entry["calls"] += 1
         entry["input_tokens"] += inp
         entry["cache_read_tokens"] += cache_read
         entry["output_tokens"] += out
         entry["thinking_tokens"] += thinking
+        if effort:
+            entry["efforts"][effort] = entry["efforts"].get(effort, 0) + 1
 
     results: list[dict] = []
     for entry in buckets.values():
         total_in = entry["input_tokens"] + entry["cache_read_tokens"]
         total = total_in + entry["output_tokens"]
+        efforts = dict(sorted(entry["efforts"].items(), key=lambda kv: kv[1], reverse=True))
         results.append({
             **entry,
+            "efforts": efforts,
             "total_input_tokens": total_in,
             "total_tokens": total,
             "cache_hit_rate": round(entry["cache_read_tokens"] / total_in * 100.0, 1) if total_in > 0 else None,
@@ -1038,6 +1075,10 @@ NATIVE_CONTEXT_WINDOWS = [
 ]
 
 EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
+EFFORT_DISPLAY_RE = re.compile(
+    r"\s*\((minimal|low|medium|high|xhigh|extra\s+high|max)\)\s*$",
+    re.IGNORECASE,
+)
 WORD_LABELS = {"gpt": "GPT", "oss": "OSS"}
 
 

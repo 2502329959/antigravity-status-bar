@@ -536,9 +536,10 @@ class ReportTest(unittest.TestCase):
         mu = self.report()["model_usage"]
         self.assertEqual(len(mu), 2)
 
-        self.assertEqual(mu[0]["model"], "Gemini 4 Hydrogen (XHigh)")
-        self.assertEqual(mu[0]["model_id"], "gemini-4-hydrogen-xhigh")
+        self.assertEqual(mu[0]["model"], "Gemini 4 Hydrogen")
+        self.assertEqual(mu[0]["model_id"], "gemini-4-hydrogen")
         self.assertEqual(mu[0]["calls"], 2)
+        self.assertEqual(mu[0]["efforts"], {"XHigh": 2})
         self.assertEqual(mu[0]["input_tokens"], 1500)
         self.assertEqual(mu[0]["cache_read_tokens"], 6000)
         self.assertEqual(mu[0]["total_input_tokens"], 7500)
@@ -548,11 +549,84 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(mu[0]["cache_hit_rate"], 80.0)
         self.assertEqual(mu[0]["share_pct"], 81.0)
 
-        self.assertEqual(mu[1]["model"], "Gemini 4 Neon (Medium)")
+        self.assertEqual(mu[1]["model"], "Gemini 4 Neon")
+        self.assertEqual(mu[1]["model_id"], "gemini-4-neon")
         self.assertEqual(mu[1]["calls"], 1)
+        self.assertEqual(mu[1]["efforts"], {"Medium": 1})
         self.assertEqual(mu[1]["total_tokens"], 2000)
         self.assertEqual(mu[1]["cache_hit_rate"], 88.2)
         self.assertEqual(mu[1]["share_pct"], 19.0)
+
+    def test_same_model_different_efforts_grouped_together(self):
+        self.basic_steps()
+        catalog = self.home / "catalog.json"
+        catalog.write_text(json.dumps({
+            "gemini-4-hydrogen-tiered-high": {"maxTokens": 1_048_576, "displayName": "Gemini 4 Hydrogen (High)"},
+            "gemini-pro-orchestrator": {"maxTokens": 1_048_576, "displayName": "Orchestrator (Carbon)"},
+            "gemini-pro-orchestrator-neon": {"maxTokens": 1_048_576, "displayName": "Orchestrator (Neon)"},
+        }))
+        # Hydrogen across XHigh, High (catalog), Medium (slug)
+        self.db.generation(
+            [group(7, 1000, ("0: USER_INPUT", 1000))],
+            usage=usage(input_tokens=1000, output=200, cache_read=3000, thinking=50),
+            model="",
+            display_name="Gemini 4 Hydrogen (XHigh)",
+        )
+        self.db.generation(
+            [group(7, 1000, ("0: USER_INPUT", 1000))],
+            usage=usage(input_tokens=500, output=100, cache_read=1500, thinking=25),
+            model="gemini-4-hydrogen-tiered-high",
+            display_name="",
+        )
+        self.db.generation(
+            [group(7, 1000, ("0: USER_INPUT", 1000))],
+            usage=usage(input_tokens=300, output=100, cache_read=1000, thinking=20),
+            model="gemini-4-hydrogen-medium",
+            display_name="",
+        )
+        # Neon across XHigh and Medium
+        self.db.generation(
+            [group(7, 1000, ("0: USER_INPUT", 1000))],
+            usage=usage(input_tokens=400, output=100, cache_read=1000, thinking=10),
+            model="",
+            display_name="Gemini 4 Neon (XHigh)",
+        )
+        self.db.generation(
+            [group(7, 1000, ("0: USER_INPUT", 1000))],
+            usage=usage(input_tokens=200, output=50, cache_read=500, thinking=5),
+            model="gemini-4-neon-medium",
+            display_name="",
+        )
+        # Non-effort parenthetical variants must stay separate
+        self.db.generation(
+            [group(7, 1000, ("0: USER_INPUT", 1000))],
+            usage=usage(input_tokens=100, output=50, cache_read=200),
+            model="gemini-pro-orchestrator",
+            display_name="",
+        )
+        self.db.generation(
+            [group(7, 1000, ("0: USER_INPUT", 1000))],
+            usage=usage(input_tokens=100, output=50, cache_read=100),
+            model="gemini-pro-orchestrator-neon",
+            display_name="",
+        )
+
+        mu = self.report("--model-catalog", str(catalog))["model_usage"]
+        by_name = {m["model"]: m for m in mu}
+        self.assertEqual(set(by_name.keys()), {
+            "Gemini 4 Hydrogen",
+            "Gemini 4 Neon",
+            "Orchestrator (Carbon)",
+            "Orchestrator (Neon)",
+        })
+        self.assertEqual(by_name["Gemini 4 Hydrogen"]["calls"], 3)
+        self.assertEqual(by_name["Gemini 4 Hydrogen"]["total_tokens"], 7700)
+        self.assertEqual(by_name["Gemini 4 Hydrogen"]["efforts"], {"XHigh": 1, "High": 1, "Medium": 1})
+        self.assertEqual(by_name["Gemini 4 Neon"]["calls"], 2)
+        self.assertEqual(by_name["Gemini 4 Neon"]["total_tokens"], 2250)
+        self.assertEqual(by_name["Gemini 4 Neon"]["efforts"], {"XHigh": 1, "Medium": 1})
+        self.assertEqual(by_name["Orchestrator (Carbon)"]["efforts"], {})
+        self.assertEqual(by_name["Orchestrator (Neon)"]["efforts"], {})
 
 
 class FormatTest(unittest.TestCase):
