@@ -6,6 +6,8 @@ The CLI reads the live trajectory from memory; this script reads the same
 protobufs from the conversation database (`steps` and `gen_metadata` tables).
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
