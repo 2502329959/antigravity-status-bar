@@ -11,9 +11,11 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
 import sys
-from urllib.parse import unquote, urlparse
+import tempfile
+from urllib.parse import quote, unquote, urlparse
 
 # --- protobuf ----------------------------------------------------------------
 
@@ -734,11 +736,10 @@ def _subagent_db_status(db_path: Path | None, sub_conv_id: str) -> str:
     if not sub_db.is_file():
         return "done"
     try:
-        conn = sqlite3.connect("file:" + sub_db.as_posix() + "?mode=ro", uri=True)
-        try:
-            rows = conn.execute("SELECT status FROM steps ORDER BY idx DESC LIMIT 5").fetchall()
-        finally:
-            conn.close()
+        rows = _query_ro_db(
+            sub_db,
+            lambda conn: conn.execute("SELECT status FROM steps ORDER BY idx DESC LIMIT 5").fetchall(),
+        )
     except sqlite3.Error:
         return "done"
     if not rows:
@@ -1034,20 +1035,75 @@ def collect_model_usage(gens: list[Msg], catalog: dict | None = None) -> list[di
 # --- main --------------------------------------------------------------------
 
 
-def load_db(db_path: Path, catalog: dict | None = None) -> tuple[list[Step], Msg | None, dict, dict, list[dict]]:
-    uri = "file:" + db_path.as_posix() + "?mode=ro"
-    conn = sqlite3.connect(uri, uri=True)
+def _sqlite_ro_uri(db_path: Path, immutable: bool = False) -> str:
+    path_str = quote(db_path.as_posix(), safe="/:")
+    suffix = "?mode=ro&immutable=1" if immutable else "?mode=ro"
+    return f"file:{path_str}{suffix}"
+
+
+def _has_nonempty_wal(db_path: Path) -> bool:
+    wal = Path(f"{db_path}-wal")
     try:
+        return wal.is_file() and wal.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _query_ro_db(db_path: Path, fn):
+    """Run read-only query callback ``fn(conn)`` with WAL-safe fallbacks.
+
+    Opening a WAL-mode SQLite DB with ``?mode=ro`` fails with
+    ``OperationalError: unable to open database file`` when no ``-shm`` file
+    exists (e.g. cleanly closed historical conversations) or when the process
+    cannot create/write ``-shm``.
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(_sqlite_ro_uri(db_path), uri=True)
+        return fn(conn)
+    except sqlite3.OperationalError as exc:
+        if "unable to open database file" not in str(exc).lower():
+            raise
+    finally:
+        if conn is not None:
+            conn.close()
+
+    if not _has_nonempty_wal(db_path):
+        conn = sqlite3.connect(_sqlite_ro_uri(db_path, immutable=True), uri=True)
+        try:
+            return fn(conn)
+        finally:
+            conn.close()
+
+    with tempfile.TemporaryDirectory(prefix="ag-status-bar-") as tmpdir:
+        tmp_db = Path(tmpdir) / db_path.name
+        shutil.copyfile(db_path, tmp_db)
+        wal = Path(f"{db_path}-wal")
+        if wal.is_file():
+            try:
+                shutil.copyfile(wal, Path(f"{tmp_db}-wal"))
+            except FileNotFoundError:
+                pass
+        conn = sqlite3.connect(tmp_db)
+        try:
+            return fn(conn)
+        finally:
+            conn.close()
+
+
+def load_db(db_path: Path, catalog: dict | None = None) -> tuple[list[Step], Msg | None, dict, dict, list[dict]]:
+    def _read(conn: sqlite3.Connection):
         rows = conn.execute(
             "SELECT idx, step_type, status, metadata, step_payload, task_details, error_details FROM steps ORDER BY idx"
         ).fetchall()
-        steps = [
-            Step(pos, r[4] or b"", r[1], r[2], r[3], idx=r[0], task_details=r[5], error_details=r[6])
-            for pos, r in enumerate(rows)
-        ]
         gen_rows = conn.execute("SELECT data FROM gen_metadata ORDER BY idx").fetchall()
-    finally:
-        conn.close()
+        return rows, gen_rows
+
+    rows, gen_rows = _query_ro_db(db_path, _read)
+    steps = [
+        Step(pos, r[4] or b"", r[1], r[2], r[3], idx=r[0], task_details=r[5], error_details=r[6])
+        for pos, r in enumerate(rows)
+    ]
     gens = [Msg(r[0]) for r in gen_rows]
     return (
         steps,
